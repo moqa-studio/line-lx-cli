@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # keyless cosign signature and build provenance
+      attestations: write # store the build provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.20.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      # A formula, not a cask: Homebrew quarantines casks on macOS, and Gatekeeper would block this
+      # binary, which has no Apple Developer ID. GoReleaser has deprecated its formula support.
+      - name: Publish the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive() {
+            name="line-lx_${version}_$1_$2.tar.gz"
+            sha256="$(awk -v name="$name" '$2 == name { print $1 }' dist/checksums.txt)"
+            test -n "$sha256"
+            printf '      url "%s"\n      sha256 "%s"\n' \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${name}" "$sha256"
+          }
+          darwin_arm64="$(archive darwin arm64)"
+          darwin_amd64="$(archive darwin amd64)"
+          linux_arm64="$(archive linux arm64)"
+          linux_amd64="$(archive linux amd64)"
+          cat > line-lx.rb <<EOF
+          class LineLx < Formula
+            desc "Put your company's agent plugins on this machine"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            version "${version}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+          ${darwin_arm64}
+              end
+              on_intel do
+          ${darwin_amd64}
+              end
+            end
+
+            on_linux do
+              on_arm do
+          ${linux_arm64}
+              end
+              on_intel do
+          ${linux_amd64}
+              end
+            end
+
+            def install
+              bin.install "line-lx"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/line-lx --version")
+            end
+          end
+          EOF
+          path=repos/moqa-studio/homebrew-tap/contents/Formula/line-lx.rb
+          update=()
+          if sha="$(gh api "$path" --jq .sha)"; then update=(-f "sha=$sha"); fi
+          gh api --silent -X PUT "$path" -f "message=line-lx ${version}" -f "content=$(base64 -w0 line-lx.rb)" "${update[@]}"
