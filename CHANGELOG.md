@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `sync` and `setup` name the hooks and MCP servers that each plugin they install or update runs on the machine.
+
 ## [0.1.1] - 2026-11-09
 
 ### Fixed

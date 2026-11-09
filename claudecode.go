@@ -235,10 +235,11 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 
 // claudeMarket is the hub's marketplace as line-lx wrote it on this machine.
 type claudeMarket struct {
-	name   string          // the name Claude Code knows it by
-	dir    string          // its folder
-	listed map[string]bool // the plugins in its marketplace.json
-	failed map[string]error
+	name    string          // the name Claude Code knows it by
+	dir     string          // its folder
+	listed  map[string]bool // the plugins in its marketplace.json
+	failed  map[string]error
+	entries map[string]map[string]json.RawMessage // each plugin's entry in the hub's marketplace
 }
 
 // claudePrepare writes the hub's marketplace to its folder and makes sure Claude Code knows it, with its
@@ -287,7 +288,11 @@ func claudePrepare(api *hubClient) (*claudeMarket, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &claudeMarket{name: cat.name, dir: dir, listed: listed, failed: failed}, nil
+	entries := map[string]map[string]json.RawMessage{}
+	for _, p := range cat.plugins {
+		entries[p.name] = p.entry
+	}
+	return &claudeMarket{name: cat.name, dir: dir, listed: listed, failed: failed, entries: entries}, nil
 }
 
 // claudeFind looks through Claude Code's marketplaces for the hub's folder (ours), marketplaces added by
@@ -532,6 +537,98 @@ func (m *claudeMarket) prune(keep map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// runs says what a plugin installed in Claude Code runs on this machine without asking: its hooks'
+// events and its MCP servers. Empty when it has neither.
+func (m *claudeMarket) runs(plugin string) string {
+	return pluginRuns(filepath.Join(m.dir, "plugins", plugin), m.entries[plugin])
+}
+
+// pluginRuns names the events of a plugin's hooks/hooks.json and the servers of its .mcp.json. Hooks or MCP
+// servers set in its plugin.json or its marketplace entry are named by kind only, and no path is followed.
+func pluginRuns(dir string, entry map[string]json.RawMessage) string {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	var manifest map[string]json.RawMessage
+	if data, ok := readSmall(root, ".claude-plugin/plugin.json"); ok {
+		_ = json.Unmarshal(data, &manifest)
+	}
+	var parts []string
+	for _, k := range []struct{ label, file, key string }{
+		{"hooks", "hooks/hooks.json", "hooks"},
+		{"MCP servers", ".mcp.json", "mcpServers"},
+	} {
+		names, found := configNames(root, k.file, k.key)
+		if declares(manifest[k.key]) || declares(entry[k.key]) {
+			found = true
+			if len(names) > 0 {
+				names = append(names, "others")
+			}
+		}
+		switch {
+		case !found:
+		case len(names) == 0:
+			parts = append(parts, k.label)
+		default:
+			parts = append(parts, k.label+" ("+listNames(names)+")")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// configNames reads the keys of a hooks or MCP file, maybe wrapped in key as in {"hooks": {"PreToolUse": …}}.
+// found is false when the file is missing, null or an empty object; any other file that isn't a JSON object
+// is found, without names, so a hook or server line-lx can't read is never left out.
+func configNames(root *os.Root, file, key string) (names []string, found bool) {
+	data, ok := readSmall(root, file)
+	if !ok {
+		return nil, false
+	}
+	var config, inner map[string]json.RawMessage
+	if json.Unmarshal(data, &config) != nil {
+		return nil, true
+	}
+	if json.Unmarshal(config[key], &inner) == nil && inner != nil {
+		config = inner
+	}
+	return sortedKeys(config), len(config) > 0
+}
+
+// declares says whether a field of plugin.json or of the marketplace entry is set: not missing, null or empty.
+func declares(v json.RawMessage) bool {
+	s := strings.TrimSpace(string(v))
+	return s != "" && s != "null" && s != "{}" && s != "[]" && s != `""`
+}
+
+// listNames joins names for the terminal: cleaned, at most 10, then how many more.
+func listNames(names []string) string {
+	var out []string
+	for _, n := range names[:min(len(names), 10)] {
+		out = append(out, clean(n))
+	}
+	if len(names) > 10 {
+		out = append(out, fmt.Sprintf("+%d more", len(names)-10))
+	}
+	return strings.Join(out, ", ")
+}
+
+// maxConfig caps what line-lx reads of a plugin's plugin.json, hooks or MCP file.
+const maxConfig = 1 << 20
+
+// readSmall reads at most maxConfig bytes of a file of the plugin. ok is false when it can't be opened,
+// as through a symlink out of the plugin's folder.
+func readSmall(root *os.Root, file string) ([]byte, bool) {
+	f, err := root.Open(filepath.FromSlash(file))
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxConfig))
+	return data, err == nil
 }
 
 func isDir(path string) bool {

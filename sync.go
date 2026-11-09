@@ -204,12 +204,17 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 					deliver(res, r, nil, errors.New("not in the hub's Claude Code marketplace"))
 				case ok && v == r.version.Version:
 					current(res, r)
-				case ok:
-					_, cerr := claude("plugin", "update", "--", id)
-					deliver(res, r, nil, cerr)
 				default:
-					_, cerr := claude("plugin", "install", "--", id)
+					cmd := "install"
+					if ok {
+						cmd = "update"
+					}
+					_, cerr := claude("plugin", cmd, "--", id)
 					deliver(res, r, nil, cerr)
+					// Claude Code runs a plugin's hooks and MCP servers without asking: say which arrived.
+					if runs := market.runs(r.name); cerr == nil && runs != "" {
+						fmt.Println("  runs on this machine: " + runs)
+					}
 				}
 			}
 			// Plugins this hub no longer has, from its marketplace only. A plugin still installed keeps

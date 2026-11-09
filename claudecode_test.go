@@ -145,8 +145,9 @@ func TestDownloadStaysOnTheHub(t *testing.T) {
 type fakeHub struct {
 	*httptest.Server
 	mu          sync.Mutex
-	version     string // "": no plugin
-	sha         string // the sha256 the marketplace lists; "" for the archive's own
+	version     string     // "": no plugin
+	sha         string     // the sha256 the marketplace lists; "" for the archive's own
+	extra       []zipEntry // more files in the archive
 	archiveHits int
 	wellKnown   int
 	deliveries  []map[string]any
@@ -155,7 +156,7 @@ type fakeHub struct {
 func (h *fakeHub) archive(version string) []byte {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
-	for _, e := range []zipEntry{manifest("basics", version), {name: "skills/greet/SKILL.md", body: "hi " + version}} {
+	for _, e := range append([]zipEntry{manifest("basics", version), {name: "skills/greet/SKILL.md", body: "hi " + version}}, h.extra...) {
 		f, _ := w.Create(e.name)
 		f.Write([]byte(e.body))
 	}
@@ -387,6 +388,79 @@ func TestSyncClaudeCodeNameClash(t *testing.T) {
 	}
 	if exists(dir) || len(hub.deliveries) != 0 || hub.archiveHits != 0 {
 		t.Errorf("a skipped Claude Code still got files (%v), deliveries (%v) or downloads (%d)", exists(dir), hub.deliveries, hub.archiveHits)
+	}
+}
+
+func TestPluginRuns(t *testing.T) {
+	hooks := `{"hooks":{"SessionStart":[],"PreToolUse":[]}}`
+	var many []string
+	for i := range 12 {
+		many = append(many, fmt.Sprintf(`"s%02d":{}`, i))
+	}
+	for name, tc := range map[string]struct {
+		files map[string]string
+		entry string // the plugin's marketplace entry
+		want  string
+	}{
+		"skills only":        {files: map[string]string{"skills/a/SKILL.md": "hi"}, want: ""},
+		"default files":      {files: map[string]string{"hooks/hooks.json": hooks, ".mcp.json": `{"github":{},"db":{}}`}, want: "hooks (PreToolUse, SessionStart) · MCP servers (db, github)"},
+		"wrapped .mcp":       {files: map[string]string{".mcp.json": `{"mcpServers":{"db":{}}}`}, want: "MCP servers (db)"},
+		"set in plugin.json": {files: map[string]string{"plugin.json": `{"hooks":"./h.json","mcpServers":{"db":{}}}`, "h.json": hooks}, want: "hooks · MCP servers"},
+		"file and manifest":  {files: map[string]string{"hooks/hooks.json": hooks, "plugin.json": `{"hooks":{"Stop":[]}}`}, want: "hooks (PreToolUse, SessionStart, others)"},
+		"set in the entry":   {entry: `{"mcpServers":{"api":{}}}`, want: "MCP servers"},
+		"empty":              {files: map[string]string{"hooks/hooks.json": `{"hooks":{}}`, ".mcp.json": `null`, "plugin.json": `{"hooks":{},"mcpServers":[]}`}, want: ""},
+		"not an object":      {files: map[string]string{"hooks/hooks.json": `[]`, ".mcp.json": `"x"`}, want: "hooks · MCP servers"},
+		"control characters": {files: map[string]string{".mcp.json": `{"a\nb":{},"\u001b[2Jc":{}}`}, want: "MCP servers ([2Jc, ab)"},
+		"over 10":            {files: map[string]string{".mcp.json": "{" + strings.Join(many, ",") + "}"}, want: "MCP servers (s00, s01, s02, s03, s04, s05, s06, s07, s08, s09, +2 more)"},
+	} {
+		dir := t.TempDir()
+		for path, body := range tc.files {
+			if path == "plugin.json" {
+				path = ".claude-plugin/plugin.json"
+			}
+			if err := writeFile(filepath.Join(dir, filepath.FromSlash(path)), body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var entry map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(tc.entry), &entry)
+		if got := pluginRuns(dir, entry); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+
+	// A symlink out of the plugin's folder isn't followed.
+	dir, outside := t.TempDir(), filepath.Join(t.TempDir(), "hooks.json")
+	if err := writeFile(outside, hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "hooks", "hooks.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got := pluginRuns(dir, nil); got != "" {
+		t.Errorf("a symlink out of the plugin was read: %q", got)
+	}
+}
+
+func TestSyncSaysWhatRuns(t *testing.T) {
+	hub := newFakeHub(t, "tok")
+	hub.extra = []zipEntry{{name: "hooks/hooks.json", body: `{"hooks":{"PreToolUse":[]}}`}}
+	bin := fakeClaude(t)
+	claudeEnv(t, hub)
+	dir, _ := claudeDir(hub.URL)
+	api := &hubClient{hub: hub.URL, token: "tok"}
+
+	out := captureStdout(t, func() { _, _ = syncAll(api) })
+	if want := "→ claude-code  installed\n  runs on this machine: hooks (PreToolUse)\n"; !strings.Contains(out, want) {
+		t.Errorf("the output lacks %q:\n%s", want, out)
+	}
+	// Up to date: nothing more to say.
+	setClaude(t, bin, `[{"name":"metro-dev","source":"directory","path":"`+dir+`"}]`, `[{"id":"basics@metro-dev","version":"1.0.0"}]`)
+	if out := captureStdout(t, func() { _, _ = syncAll(api) }); strings.Contains(out, "runs on this machine") {
+		t.Errorf("an up-to-date plugin says what it runs:\n%s", out)
 	}
 }
 

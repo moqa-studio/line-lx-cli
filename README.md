@@ -63,7 +63,7 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx login [--hub URL]` | Signs in through the browser. `--hub` is remembered for the next commands. |
 | `line-lx logout` | Revokes the refresh token at the hub (best effort) and forgets this machine's sign-in. |
 | `line-lx whoami` | Shows you, your workspace, your role and the hub. |
-| `line-lx sync` | Writes the newest version of each plugin to every agent found here, removes the ones gone from the hub, and reports each delivery to the hub. Exit 1 if a target failed or no agent is found. |
+| `line-lx sync` | Writes the newest version of each plugin to every agent found here, removes the ones gone from the hub, and reports each delivery to the hub. Under each plugin it installs or updates, it names the hooks and MCP servers the plugin brings, which the agent runs on this machine. Exit 1 if a target failed or no agent is found. |
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
 | `line-lx doctor` | Checks the hub, your sign-in and each agent. Exit 1 when something is wrong. |
 | `line-lx --version` | Prints the version. |
