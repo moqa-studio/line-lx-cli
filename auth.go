@@ -194,13 +194,15 @@ type oauthConfig struct {
 
 // discover reads the hub's OAuth metadata. The authorization endpoint is opened in the browser, so every
 // endpoint must be on the hub itself: a hub can't send line-lx (or the browser opener) anywhere else.
+// The protected resource is the hub's MCP server, <hub>/mcp; its metadata must name exactly that
+// resource (RFC 9728).
 func discover(hub string) (*oauthConfig, error) {
 	var oc oauthConfig
 	if err := getJSON(hub+"/.well-known/oauth-authorization-server", &oc); err != nil {
 		return nil, err
 	}
 	var pr struct{ Resource string }
-	if err := getJSON(hub+"/.well-known/oauth-protected-resource", &pr); err != nil {
+	if err := getJSON(hub+"/.well-known/oauth-protected-resource/mcp", &pr); err != nil {
 		return nil, err
 	}
 	hubURL, _ := url.Parse(hub)
@@ -208,7 +210,7 @@ func discover(hub string) (*oauthConfig, error) {
 		u, err := url.Parse(endpoint)
 		return err == nil && allowedScheme(u) && u.Host == hubURL.Host && u.User == nil
 	}
-	ok := strings.TrimRight(oc.Issuer, "/") == hub && pr.Resource != "" &&
+	ok := strings.TrimRight(oc.Issuer, "/") == hub && pr.Resource == hub+"/mcp" &&
 		onHub(oc.AuthorizationEndpoint) && onHub(oc.TokenEndpoint) && onHub(oc.RegistrationEndpoint) &&
 		(oc.RevocationEndpoint == "" || onHub(oc.RevocationEndpoint))
 	if !ok {

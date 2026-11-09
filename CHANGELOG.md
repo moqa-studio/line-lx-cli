@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-09
+
+### Fixed
+
+- `login` and `setup` read the hub's protected resource metadata at its RFC 9728 address, `/.well-known/oauth-protected-resource/mcp`. They failed with a 404 against a real hub.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added
@@ -14,5 +20,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moqa-studio/line-lx-cli/releases/tag/v0.1.0

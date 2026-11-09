@@ -111,18 +111,19 @@ func TestFlatWriteAfterInterruption(t *testing.T) {
 func discoveryServer(t *testing.T, edit func(doc map[string]string)) *httptest.Server {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		doc := map[string]string{
+			"issuer":                 srv.URL,
+			"authorization_endpoint": srv.URL + "/api/auth/oauth2/authorize",
+			"token_endpoint":         srv.URL + "/api/auth/oauth2/token",
+			"registration_endpoint":  srv.URL + "/api/auth/oauth2/register",
+			"resource":               srv.URL + "/mcp",
+		}
+		edit(doc)
 		switch r.URL.Path {
 		case "/.well-known/oauth-authorization-server":
-			doc := map[string]string{
-				"issuer":                 srv.URL,
-				"authorization_endpoint": srv.URL + "/api/auth/oauth2/authorize",
-				"token_endpoint":         srv.URL + "/api/auth/oauth2/token",
-				"registration_endpoint":  srv.URL + "/api/auth/oauth2/register",
-			}
-			edit(doc)
 			_ = json.NewEncoder(w).Encode(doc)
-		case "/.well-known/oauth-protected-resource":
-			_ = json.NewEncoder(w).Encode(map[string]string{"resource": "http://localhost:8001/mcp"})
+		case "/.well-known/oauth-protected-resource/mcp":
+			_ = json.NewEncoder(w).Encode(map[string]string{"resource": doc["resource"]})
 		default:
 			http.NotFound(w, r)
 		}
@@ -143,6 +144,7 @@ func TestDiscoverRefusesEndpointsElsewhere(t *testing.T) {
 		"another issuer":       func(d map[string]string) { d["issuer"] = "https://evil.example" },
 		"revocation elsewhere": func(d map[string]string) { d["revocation_endpoint"] = "https://evil.example/revoke" },
 		"registration missing": func(d map[string]string) { delete(d, "registration_endpoint") },
+		"another resource":     func(d map[string]string) { d["resource"] = "https://evil.example/mcp" },
 	} {
 		srv := discoveryServer(t, edit)
 		if _, err := discover(srv.URL); err == nil {
@@ -220,7 +222,7 @@ func TestRefusedRefreshMeansSignIn(t *testing.T) {
 		case "/.well-known/oauth-authorization-server":
 			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": srv.URL, "authorization_endpoint": srv.URL + "/authorize",
 				"token_endpoint": srv.URL + "/token", "registration_endpoint": srv.URL + "/register"})
-		case "/.well-known/oauth-protected-resource":
+		case "/.well-known/oauth-protected-resource/mcp":
 			_ = json.NewEncoder(w).Encode(map[string]string{"resource": srv.URL + "/mcp"})
 		case "/token":
 			w.WriteHeader(status)
