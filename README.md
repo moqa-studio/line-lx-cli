@@ -79,6 +79,8 @@ Claude Code gets the plugins from the hub's marketplace by itself. `line-lx setu
 - each plugin of the marketplace, `<plugin>@metro-<workspace>`, enabled, so the first Claude Code session brings them all. A plugin you turned off stays off, and line-lx removes the ones gone from the hub.
 - the plugin `metro-lx@metro-<workspace>`, enabled. It depends on every plugin of your workspace, so a plugin published later comes when Claude Code auto-updates. `line-lx sync` installs anything still missing at once.
 
+New versions of the installed plugins come from Claude Code's auto-update: `line-lx sync` installs what's missing, it doesn't update.
+
 Claude Code fetches the marketplace when it starts, and needs version 2.1.238 or later. The first time, the plugins come in a new Claude Code session: `claude plugin marketplace add` refuses a marketplace whose settings entry has a `headersHelper`, so line-lx can't add it to the running Claude Code. line-lx keeps the other settings, but rewrites `settings.json` formatted, with its keys sorted. It leaves Claude Code alone when it already has another marketplace under the hub's name.
 
 `line-lx auth-header` answers only Claude Code, which names the marketplace or archive it asks headers for (`CLAUDE_CODE_MARKETPLACE_URL`, `CLAUDE_CODE_PLUGIN_ARCHIVE_URL`), and gives your sign-in only to your current hub: every URL named must be under the hub's URL. It refreshes the sign-in when needed, and stops after 9 seconds.

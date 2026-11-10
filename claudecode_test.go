@@ -37,14 +37,15 @@ func TestMain(m *testing.M) {
 type fakeHub struct {
 	*httptest.Server
 	mu         sync.Mutex
-	version    string // "": no plugin
-	noBundle   bool   // the marketplace lacks the bundle plugin (a hub before it)
+	version    string   // "": no plugin
+	catalog    []string // the marketplace's plugins, but the bundle
+	noBundle   bool     // the marketplace lacks the bundle plugin (a hub before it)
 	wellKnown  int
 	deliveries []map[string]any
 }
 
 func newFakeHub(t *testing.T, token string) *fakeHub {
-	h := &fakeHub{version: "1.0.0"}
+	h := &fakeHub{version: "1.0.0", catalog: []string{"basics", "notes", "tools"}}
 	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -69,7 +70,10 @@ func newFakeHub(t *testing.T, token string) *fakeHub {
 		case "GET /api/plugins/p1/versions":
 			fmt.Fprintf(w, `[{"id":"v-%s","version":%q,"snapshot":{"skills":[{"name":"greet","content":"hi","files":[]}]}}]`, h.version, h.version)
 		case "GET /api/connectors/claude-code/marketplace.json":
-			plugins := []any{map[string]any{"name": "basics"}, map[string]any{"name": "notes"}, map[string]any{"name": "tools"}}
+			plugins := []any{}
+			for _, name := range h.catalog {
+				plugins = append(plugins, map[string]any{"name": name})
+			}
 			if !h.noBundle {
 				plugins = append(plugins, map[string]any{"name": bundlePlugin})
 			}
@@ -89,12 +93,14 @@ func newFakeHub(t *testing.T, token string) *fakeHub {
 }
 
 // fakeClaude puts a `claude` on PATH that records its arguments and answers the two list commands
-// with the files markets.json and plugins.json. It returns the folder holding them.
+// with the files markets.json and plugins.json. A call whose arguments are in the file fail fails. It
+// returns the folder holding them.
 func fakeClaude(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
 	script := `#!/bin/sh
 echo "$*" >> '` + bin + `/argv'
+if [ -f '` + bin + `/fail' ] && [ "$*" = "$(/bin/cat '` + bin + `/fail')" ]; then echo "boom" >&2; exit 1; fi
 case "$*" in
   "--version") echo "2.1.292 (Claude Code)" ;;
   "plugin marketplace list --json") /bin/cat '` + bin + `/markets.json' ;;
@@ -175,9 +181,14 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	hub := newFakeHub(t, "tok")
 	bin := fakeClaude(t)
 	settings := claudeEnv(t, hub)
-	// tools is turned off by the person; gone isn't in the hub anymore; the other marketplaces' keys stay.
+	// tools is turned off by the person; gone isn't in the hub anymore, nor off, which the person turned
+	// off; the other marketplaces' keys stay, even when they look like ours.
 	writeSettings(t, settings, `{"theme":"dark","env":{"A":"1"},"statusLine":{"type":"command","command":"a && b <c>"},
-		"enabledPlugins":{"other@elsewhere":false,"gone@elsewhere":true,"tools@metro-dev":false,"gone@metro-dev":true}}`, 0o600)
+		"enabledPlugins":{"other@elsewhere":false,"gone@elsewhere":true,"tools@metro-dev":false,"gone@metro-dev":true,
+		"off@metro-dev":false,"x@metro-dev-2":true,"metro-dev@x":true,"metro-lx@other":true}}`, 0o600)
+	hub.mu.Lock()
+	hub.catalog = append(hub.catalog, "Bad Name\x1b[31m")
+	hub.mu.Unlock()
 
 	// Round 1: Claude Code doesn't know the marketplace. line-lx declares it; Claude Code fetches it when it starts.
 	var results []*agentResult
@@ -192,9 +203,13 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 		t.Errorf("other settings changed: %v", s)
 	}
 	wantEnabled := map[string]any{"other@elsewhere": false, "gone@elsewhere": true, "tools@metro-dev": false,
+		"off@metro-dev": false, "x@metro-dev-2": true, "metro-dev@x": true, "metro-lx@other": true,
 		"basics@metro-dev": true, "notes@metro-dev": true, "metro-lx@metro-dev": true}
 	if enabled := s["enabledPlugins"]; !reflect.DeepEqual(enabled, wantEnabled) {
 		t.Errorf("enabledPlugins = %v\nwant %v", enabled, wantEnabled)
+	}
+	if !strings.Contains(out, `claude-code  skipped the plugin "Bad Name[31m": line-lx refuses its name`+"\n") {
+		t.Errorf("the refused name isn't shown, or not sanitized:\n%q", out)
 	}
 	if !strings.Contains(read(t, settings), `"command": "a && b <c>"`) {
 		t.Errorf("a setting was escaped:\n%s", read(t, settings))
@@ -219,8 +234,8 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 		t.Errorf("leftovers next to the settings: %v", entries)
 	}
 
-	// Round 2: Claude Code knows it now. Nothing to write; line-lx installs the enabled plugins it lacks,
-	// then the bundle, and not tools, which is off.
+	// Round 2: Claude Code knows it now. Nothing to write; line-lx installs the enabled plugins it lacks:
+	// not tools, which is off, nor the bundle, which could bring a plugin that's off.
 	before := read(t, settings)
 	known := `[{"name":"metro-dev","source":"url","url":"` + marketplaceURL(hub.URL) + `"}]`
 	setClaude(t, bin, known, `[{"id":"basics@metro-dev","version":"1.0.0"},{"id":"notes@elsewhere","version":"1.0.0"}]`)
@@ -228,14 +243,14 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv,
-		"plugin list --json\nplugin install -- notes@metro-dev\nplugin install -- metro-lx@metro-dev\n") || strings.Contains(argv, "basics@") || strings.Contains(argv, "tools@") {
+	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv, "plugin list --json\nplugin install -- notes@metro-dev\n") ||
+		strings.Contains(argv, "basics@") || strings.Contains(argv, "tools@") || strings.Contains(argv, "metro-lx@") {
 		t.Errorf("claude wasn't asked to install the missing plugins only; it got:\n%s", argv)
 	}
 	if read(t, settings) != before {
 		t.Error("an up-to-date sync rewrote the settings")
 	}
-	if !strings.Contains(out, "claude-code  already connected: Claude Code gets Dev's plugins from the hub by itself.\n") {
+	if !strings.Contains(out, "claude-code  already connected: Claude Code gets Dev's plugins from the hub by itself. Next: run /reload-plugins") {
 		t.Errorf("output:\n%s", out)
 	}
 
@@ -254,6 +269,77 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	out = captureStdout(t, func() { results, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
 	if err != nil || !strings.Contains(out, "claude-code  skipped: "+errNoBundle.Error()) || results[0].skipped == "" {
 		t.Errorf("sync = %v:\n%s", err, out)
+	}
+}
+
+func TestSyncClaudeCodeInstallsWhatItCan(t *testing.T) {
+	hub := newFakeHub(t, "tok")
+	bin := fakeClaude(t)
+	claudeEnv(t, hub)
+	run := func() (string, error) {
+		var err error
+		out := captureStdout(t, func() { _, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
+		return out, err
+	}
+	if out, err := run(); err != nil { // connects; Claude Code knows the marketplace from now on
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	known := `[{"name":"metro-dev","source":"url","url":"` + marketplaceURL(hub.URL) + `"}]`
+	oldDir, _ := claudeDir(hub.URL)
+
+	// An install that fails doesn't stop the others, nor the cleanup, nor the connection.
+	setClaude(t, bin, known, `[]`)
+	if err := os.WriteFile(filepath.Join(bin, "fail"), []byte("plugin install -- basics@metro-dev"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run()
+	argv := read(t, filepath.Join(bin, "argv"))
+	for _, want := range []string{"basics", "notes", "tools"} {
+		if !strings.Contains(argv, "plugin install -- "+want+"@metro-dev\n") {
+			t.Errorf("%s wasn't installed; claude got:\n%s", want, argv)
+		}
+	}
+	want := "It installs basics at its next start instead (`claude plugin install -- basics@metro-dev`: boom)."
+	if err != nil || !strings.Contains(out, want) || exists(oldDir) {
+		t.Errorf("sync = %v, former folder left: %v:\n%s", err, exists(oldDir), out)
+	}
+	os.Remove(filepath.Join(bin, "fail"))
+
+	// Claude Code can't list its plugins: no install, and the next start brings them.
+	setClaude(t, bin, known, `not json`)
+	out, err = run()
+	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") || !strings.Contains(out, "already connected") {
+		t.Errorf("sync = %v; claude got:\n%s\n%s", err, argv, out)
+	}
+
+	// Past the deadline, line-lx starts no install.
+	old := claudeInstallWait
+	claudeInstallWait = -time.Second
+	t.Cleanup(func() { claudeInstallWait = old })
+	setClaude(t, bin, known, `[]`)
+	out, err = run()
+	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") ||
+		!strings.Contains(out, "It installs basics, notes, tools at its next start instead (line-lx stopped installing after") {
+		t.Errorf("sync = %v; claude got:\n%s\n%s", err, argv, out)
+	}
+}
+
+func TestClaudeSettingsKeepPluginsWithAnEmptyCatalog(t *testing.T) {
+	hub := newFakeHub(t, "tok")
+	hub.catalog = nil // the bundle only: no reason to drop the plugins enabled before
+	fakeClaude(t)
+	settings := claudeEnv(t, hub)
+	writeSettings(t, settings, `{"enabledPlugins":{"basics@metro-dev":true}}`, 0o644)
+	captureStdout(t, func() {
+		if _, err := syncAll(&hubClient{hub: hub.URL, token: "tok"}); err != nil {
+			t.Errorf("sync: %v", err)
+		}
+	})
+	if enabled := readSettings(t, settings)["enabledPlugins"]; !reflect.DeepEqual(enabled, map[string]any{"basics@metro-dev": true, "metro-lx@metro-dev": true}) {
+		t.Errorf("enabledPlugins = %v", enabled)
 	}
 }
 

@@ -97,6 +97,10 @@ func marketplaceURL(hub string) string { return hub + "/api/connectors/claude-co
 // prompt it can't show) must not hold line-lx, nor the agent that runs it.
 var claudeTimeout = 2 * time.Minute
 
+// claudeInstallWait bounds the installs of one sync: line-lx starts no install past it, and the plugins
+// left come at Claude Code's next start.
+var claudeInstallWait = 3 * time.Minute
+
 // claude runs the claude CLI; on failure the error carries its stderr. Callers put `--` before
 // positional arguments, so a name can never be read as a flag. Its stdin is empty: it never prompts.
 // A call that takes over claudeTimeout is stopped, and fails.
@@ -213,10 +217,10 @@ func claudeSkipped(err error) bool {
 }
 
 // hubCatalog is what line-lx needs from the hub's marketplace: its name, its owner (the workspace), and
-// its plugins but the bundle.
+// its plugins but the bundle, without the names line-lx refuses (in refused).
 type hubCatalog struct {
-	name, owner string
-	plugins     []string
+	name, owner      string
+	plugins, refused []string
 }
 
 // hubMarketplace fetches the hub's Claude Code marketplace (errNoMarketplace on 404, errNoBundle without
@@ -246,7 +250,9 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 		switch {
 		case p.Name == bundlePlugin:
 			bundle = true
-		case validName(p.Name) && !slices.Contains(cat.plugins, p.Name):
+		case !validName(p.Name):
+			cat.refused = append(cat.refused, clean(p.Name))
+		case !slices.Contains(cat.plugins, p.Name):
 			cat.plugins = append(cat.plugins, p.Name)
 		}
 	}
@@ -444,11 +450,14 @@ func connectSettings(s map[string]json.RawMessage, path string, cat *hubCatalog,
 	markets[cat.name] = rawJSON(m)
 
 	// Each plugin of the catalog, enabled: Claude Code downloads an enabled plugin it lacks when it starts,
-	// which it doesn't do for the bundle's dependencies. A plugin the person turned off stays off; one the
-	// hub no longer has goes. The bundle brings the plugins published later, when Claude Code auto-updates.
+	// which it doesn't do for the bundle's dependencies. A plugin the person turned off stays off. One the
+	// hub no longer has goes, unless the person turned it off, or the catalog is empty (a hub that lists
+	// nothing isn't a reason to drop everything). The bundle brings the plugins published later, when
+	// Claude Code auto-updates.
 	enabled[bundlePlugin+"@"+cat.name] = json.RawMessage("true")
-	for id := range enabled {
-		if plugin, ok := strings.CutSuffix(id, "@"+cat.name); ok && plugin != bundlePlugin && !slices.Contains(cat.plugins, plugin) {
+	for id, v := range enabled {
+		plugin, ok := strings.CutSuffix(id, "@"+cat.name)
+		if ok && len(cat.plugins) > 0 && string(v) == "true" && plugin != bundlePlugin && !slices.Contains(cat.plugins, plugin) {
 			delete(enabled, id)
 		}
 	}
@@ -578,6 +587,9 @@ func claudeConnect(api *hubClient) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	for _, name := range cat.refused {
+		fmt.Printf("%-12s skipped the plugin %q: line-lx refuses its name\n", claudeTarget, name)
+	}
 	oldDir, err := claudeDir(api.hub)
 	if err != nil {
 		return "", err
@@ -646,21 +658,35 @@ func claudeConnect(api *hubClient) (string, error) {
 	// Claude Code fetches the marketplace again from a source its settings changed, when it starts; until
 	// then, its CLI doesn't list it. So line-lx installs now only from a marketplace whose source it kept.
 	now := known && old.Source.Source == "url" && old.Source.URL == marketplaceURL(api.hub) && old.Source.HeadersHelper == helper
+	// Each enabled plugin Claude Code hasn't installed. Not the bundle: installing it could bring a plugin
+	// the person turned off; the next start fetches it. A plugin line-lx can't install now comes at the next
+	// start too, so a failure here isn't one of the connection.
+	var pending []string
+	var installErr error
+	installedSome := false
+	var installed map[string]string
 	if now {
-		// Each enabled plugin Claude Code hasn't installed, then the bundle. `claude plugin install` refreshes
-		// the marketplace first.
-		installed, err := claudeInstalled(cat.name)
-		if err != nil {
-			return "", err
-		}
+		installed, err = claudeInstalled(cat.name) // unreadable: the next start brings them
+	}
+	if now && err == nil {
 		enabled, _ := settingsObject(s, "enabledPlugins", path)
-		for _, plugin := range append(slices.Clone(cat.plugins), bundlePlugin) {
-			_, has := installed[plugin]
-			if has || string(enabled[plugin+"@"+cat.name]) != "true" {
+		deadline := time.Now().Add(claudeInstallWait)
+		for _, plugin := range cat.plugins {
+			if _, has := installed[plugin]; has || string(enabled[plugin+"@"+cat.name]) != "true" {
 				continue
 			}
-			if _, err := claude("plugin", "install", "--", plugin+"@"+cat.name); err != nil {
-				return "", err
+			err := fmt.Errorf("line-lx stopped installing after %s", durationText(claudeInstallWait))
+			if time.Now().Before(deadline) {
+				_, err = claude("plugin", "install", "--", plugin+"@"+cat.name)
+			}
+			switch {
+			case err == nil:
+				installedSome = true
+			case installErr == nil:
+				installErr = err
+				fallthrough
+			default:
+				pending = append(pending, plugin)
 			}
 		}
 	}
@@ -673,16 +699,23 @@ func claudeConnect(api *hubClient) (string, error) {
 	}
 
 	gets := fmt.Sprintf("Claude Code gets %s's plugins from the hub", cat.owner)
-	switch {
-	case now && !changed:
-		return "already connected: " + gets + " by itself.", nil
-	case now:
-		return "connected: " + gets + " by itself. Next: run /reload-plugins in Claude Code, or restart it.", nil
+	if !now {
+		// Claude Code doesn't know the marketplace (yet): it fetches it when it starts.
+		msg := "connected: " + gets + " from its next start."
+		if len(stale) > 0 || old.Source.Source == "directory" {
+			msg += " The plugins line-lx installed before come back when Claude Code starts again."
+		}
+		return msg, nil
 	}
-	// Claude Code doesn't know the marketplace (yet): it fetches it when it starts.
-	msg := "connected: " + gets + " from its next start."
-	if len(stale) > 0 || old.Source.Source == "directory" {
-		msg += " The plugins line-lx installed before come back when Claude Code starts again."
+	msg := "connected: " + gets + " by itself."
+	if !changed {
+		msg = "already " + msg
+	}
+	if changed || installedSome {
+		msg += " Next: run /reload-plugins in Claude Code, or restart it."
+	}
+	if len(pending) > 0 {
+		msg += fmt.Sprintf(" It installs %s at its next start instead (%v).", strings.Join(pending, ", "), installErr)
 	}
 	return msg, nil
 }
