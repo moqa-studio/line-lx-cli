@@ -12,8 +12,8 @@ import (
 var lockWait = 30 * time.Second
 
 // syncLock lets one line-lx at a time write to this machine's agents. Two syncs would share the staging
-// folders (<config dir>/line-lx/claude-code/.staging, ~/.codex/.line-lx-staging, ~/.pi/agent/.line-lx-staging)
-// and each clears them when it starts, under the other's feet. The lock is per person, not per hub: the
+// folders (~/.codex/.line-lx-staging, ~/.pi/agent/.line-lx-staging) and Claude Code's settings, and each
+// clears the staging folders when it starts, under the other's feet. The lock is per person, not per hub: the
 // agents' folders are too. It is a lock on <config dir>/line-lx/sync.lock, which the OS drops when line-lx
 // exits, however it exits, so it never goes stale.
 func syncLock() (unlock func(), err error) {

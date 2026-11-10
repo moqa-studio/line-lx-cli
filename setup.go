@@ -22,8 +22,8 @@ func runSetup(hubFlag string) error {
 	}
 	results, err := syncAll(api)
 	if errors.Is(err, errNoAgent) {
-		fmt.Print("\nNo agent found on this machine. line-lx writes plugins for Claude Code (`claude` on PATH), " +
-			"Codex (~/.codex) and pi (~/.pi/agent): install one, then run `line-lx setup` again.\n")
+		fmt.Print("\nNo agent found on this machine. line-lx connects Claude Code (~/.claude or `claude` on PATH) " +
+			"and writes plugins for Codex (~/.codex) and pi (~/.pi/agent): install one, then run `line-lx setup` again.\n")
 		if mcp := clean(m.Endpoints.MCP); mcp != "" {
 			fmt.Printf("Claude, ChatGPT and other MCP clients connect to the MCP server instead: %s\n", mcp)
 		} else {
@@ -83,17 +83,13 @@ func setupSummary(hub string, results []*agentResult) string {
 		case r.skipped != "":
 			msg = "nothing installed: " + r.skipped + "."
 		case r.name == claudeTarget:
-			switch {
-			case n == 0 && r.synced > 0:
-			case r.where == "": // line-lx couldn't get as far as the marketplace
-				msg = plural(n, "plugin") + "."
-			default:
-				msg = fmt.Sprintf("%s, installed as <plugin>@%s.", plural(n, "plugin"), r.where)
+			// Claude Code gets the plugins by itself: what line-lx did is connecting it, or failing to.
+			msg = r.connected
+			if r.failed > 0 {
+				msg = "not connected: see above, or run `line-lx doctor`."
 			}
-			if r.synced > 0 {
-				msg = strings.TrimSpace(msg + " " + plural(r.synced, "plugin") +
-					" already there through your claude.ai account (<plugin>@synced), not installed again.")
-			}
+			fmt.Fprintf(&b, "  %-12s %s\n", agentName(r.name), msg)
+			continue
 		default:
 			where := r.where
 			if home != "" && strings.HasPrefix(where, home+string(os.PathSeparator)) {
@@ -126,11 +122,9 @@ func agentName(target string) string {
 	return target
 }
 
-// nextStep is what the person does for an agent to load what line-lx just changed.
+// nextStep is what the person does for an agent to load what line-lx just wrote.
 func nextStep(target string) string {
 	switch target {
-	case claudeTarget:
-		return "Next: run /reload-plugins in Claude Code, or restart it."
 	case "pi":
 		return "Next: restart pi."
 	case "codex":
