@@ -25,12 +25,15 @@ import (
 //
 // line-lx connects Claude Code once. In its user settings, it declares the hub's marketplace, a url source
 // whose headersHelper is `line-lx auth-header`, so Claude Code sends the person's token with each fetch, and
-// turns on its auto-update. It also enables the hub's bundle plugin, metro-lx, which depends on every plugin
-// of the workspace: Claude Code installs, updates and removes them by itself (Claude Code 2.1.238 or later).
+// turns on its auto-update. It enables each plugin of the marketplace, and the hub's bundle plugin,
+// metro-lx, which depends on every plugin of the workspace: Claude Code installs, updates and removes them
+// by itself (Claude Code 2.1.238 or later), and gets a plugin published later through the bundle.
 //
-// Claude Code fetches a marketplace its settings declare when it starts. `claude plugin marketplace add`
-// refuses one whose settings entry has a headersHelper (Claude Code 2.1.292), so line-lx refreshes the
-// marketplace through `claude` only once Claude Code knows it.
+// Claude Code fetches a marketplace its settings declare when it starts, and downloads the enabled plugins
+// it lacks, but not the bundle's dependencies. `claude plugin marketplace add` refuses a marketplace whose
+// settings entry has a headersHelper (Claude Code 2.1.292), so line-lx installs through `claude` only once
+// Claude Code knows the marketplace. Its dependency install brings one missing plugin per run (2.1.292),
+// so line-lx installs each missing plugin itself.
 
 // bundlePlugin is the hub's plugin that depends on all the others.
 const bundlePlugin = "metro-lx"
@@ -209,8 +212,12 @@ func claudeSkipped(err error) bool {
 	return errors.Is(err, errNoMarketplace) || errors.Is(err, errNoBundle) || errors.As(err, &clash)
 }
 
-// hubCatalog is what line-lx needs from the hub's marketplace: its name, and its owner, the workspace.
-type hubCatalog struct{ name, owner string }
+// hubCatalog is what line-lx needs from the hub's marketplace: its name, its owner (the workspace), and
+// its plugins but the bundle.
+type hubCatalog struct {
+	name, owner string
+	plugins     []string
+}
 
 // hubMarketplace fetches the hub's Claude Code marketplace (errNoMarketplace on 404, errNoBundle without
 // the bundle plugin).
@@ -230,14 +237,23 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 	if !validName(doc.Name) {
 		return nil, errors.New("the hub's marketplace has no valid name")
 	}
-	if !slices.ContainsFunc(doc.Plugins, func(p struct{ Name string }) bool { return p.Name == bundlePlugin }) {
+	cat := &hubCatalog{name: doc.Name, owner: clean(doc.Owner.Name)}
+	if cat.owner == "" {
+		cat.owner = "your workspace"
+	}
+	bundle := false
+	for _, p := range doc.Plugins {
+		switch {
+		case p.Name == bundlePlugin:
+			bundle = true
+		case validName(p.Name) && !slices.Contains(cat.plugins, p.Name):
+			cat.plugins = append(cat.plugins, p.Name)
+		}
+	}
+	if !bundle {
 		return nil, errNoBundle
 	}
-	owner := clean(doc.Owner.Name)
-	if owner == "" {
-		owner = "your workspace"
-	}
-	return &hubCatalog{name: doc.Name, owner: owner}, nil
+	return cat, nil
 }
 
 // plainPath is a path sh runs as written.
@@ -391,7 +407,7 @@ func (m settingsMarket) entry() claudeMarketplaceEntry {
 	return claudeMarketplaceEntry{Source: m.Source.Source, Path: m.Source.Path, URL: m.Source.URL}
 }
 
-// connectSettings declares the hub's marketplace in settings, under its name, and enables its bundle.
+// connectSettings declares the hub's marketplace in settings, under its name, and enables its plugins.
 // Entries for this hub under another name (the workspace's former slug) or for line-lx's former folder go,
 // with the plugins enabled from them. It refuses another marketplace under the hub's name.
 func connectSettings(s map[string]json.RawMessage, path string, cat *hubCatalog, hub, oldDir, helper string) error {
@@ -426,7 +442,21 @@ func connectSettings(s map[string]json.RawMessage, path string, cat *hubCatalog,
 	var m settingsMarket
 	m.Source.Source, m.Source.URL, m.Source.HeadersHelper, m.AutoUpdate = "url", marketplaceURL(hub), helper, true
 	markets[cat.name] = rawJSON(m)
+
+	// Each plugin of the catalog, enabled: Claude Code downloads an enabled plugin it lacks when it starts,
+	// which it doesn't do for the bundle's dependencies. A plugin the person turned off stays off; one the
+	// hub no longer has goes. The bundle brings the plugins published later, when Claude Code auto-updates.
 	enabled[bundlePlugin+"@"+cat.name] = json.RawMessage("true")
+	for id := range enabled {
+		if plugin, ok := strings.CutSuffix(id, "@"+cat.name); ok && plugin != bundlePlugin && !slices.Contains(cat.plugins, plugin) {
+			delete(enabled, id)
+		}
+	}
+	for _, plugin := range cat.plugins {
+		if _, set := enabled[plugin+"@"+cat.name]; !set {
+			enabled[plugin+"@"+cat.name] = json.RawMessage("true")
+		}
+	}
 	s["extraKnownMarketplaces"], s["enabledPlugins"] = rawJSON(markets), rawJSON(enabled)
 	return nil
 }
@@ -542,7 +572,7 @@ func claudeBlocked(api *hubClient) error {
 }
 
 // claudeConnect connects Claude Code to the hub, and says what it did in one sentence. Running it again
-// changes nothing, and makes Claude Code install the plugins its bundle has gained.
+// changes nothing, but installs the plugins Claude Code still lacks.
 func claudeConnect(api *hubClient) (string, error) {
 	cat, err := hubMarketplace(api)
 	if err != nil {
@@ -582,7 +612,7 @@ func claudeConnect(api *hubClient) (string, error) {
 				return "", errMarketplaceClash{cat.name, m.Path + m.URL}
 			}
 		}
-		// Removing a marketplace uninstalls its plugins: the bundle installs them again from the hub.
+		// Removing a marketplace uninstalls its plugins: Claude Code installs them again from the hub.
 		for _, name := range stale {
 			if !validName(name) {
 				return "", fmt.Errorf("Claude Code has the hub's marketplace under an invalid name %q", clean(name))
@@ -617,9 +647,21 @@ func claudeConnect(api *hubClient) (string, error) {
 	// then, its CLI doesn't list it. So line-lx installs now only from a marketplace whose source it kept.
 	now := known && old.Source.Source == "url" && old.Source.URL == marketplaceURL(api.hub) && old.Source.HeadersHelper == helper
 	if now {
-		// It refreshes the marketplace first, and installs what the bundle lacks, even when it's installed.
-		if _, err := claude("plugin", "install", "--", bundlePlugin+"@"+cat.name); err != nil {
+		// Each enabled plugin Claude Code hasn't installed, then the bundle. `claude plugin install` refreshes
+		// the marketplace first.
+		installed, err := claudeInstalled(cat.name)
+		if err != nil {
 			return "", err
+		}
+		enabled, _ := settingsObject(s, "enabledPlugins", path)
+		for _, plugin := range append(slices.Clone(cat.plugins), bundlePlugin) {
+			_, has := installed[plugin]
+			if has || string(enabled[plugin+"@"+cat.name]) != "true" {
+				continue
+			}
+			if _, err := claude("plugin", "install", "--", plugin+"@"+cat.name); err != nil {
+				return "", err
+			}
 		}
 	}
 	// line-lx's former folder, once Claude Code no longer reads plugins from it.

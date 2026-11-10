@@ -76,7 +76,8 @@ Agents are used only when found on the machine: Claude Code (`~/.claude` exists,
 Claude Code gets the plugins from the hub's marketplace by itself. `line-lx setup` and `line-lx sync` connect it once, in its user settings (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`):
 
 - the hub's marketplace, `metro-<workspace>`, fetched from `<hub>/api/connectors/claude-code/marketplace.json` with auto-update on. Its `headersHelper` is `<path to line-lx> auth-header`, so Claude Code sends your sign-in to the hub.
-- the plugin `metro-lx@metro-<workspace>`, enabled. It depends on every plugin of your workspace, so Claude Code installs the new ones, updates them and removes the ones gone from the hub.
+- each plugin of the marketplace, `<plugin>@metro-<workspace>`, enabled, so the first Claude Code session brings them all. A plugin you turned off stays off, and line-lx removes the ones gone from the hub.
+- the plugin `metro-lx@metro-<workspace>`, enabled. It depends on every plugin of your workspace, so a plugin published later comes when Claude Code auto-updates. `line-lx sync` installs anything still missing at once.
 
 Claude Code fetches the marketplace when it starts, and needs version 2.1.238 or later. The first time, the plugins come in a new Claude Code session: `claude plugin marketplace add` refuses a marketplace whose settings entry has a `headersHelper`, so line-lx can't add it to the running Claude Code. line-lx keeps the other settings, but rewrites `settings.json` formatted, with its keys sorted. It leaves Claude Code alone when it already has another marketplace under the hub's name.
 
@@ -96,7 +97,7 @@ Admins can connect Claude Code on every machine with [managed settings](https://
 }
 ```
 
-`<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx. `line-lx doctor` and `line-lx list` see a marketplace declared in Claude Code's managed settings files (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux), not one from an MDM profile or server-managed settings.
+`<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx. Claude Code doesn't install the dependencies of `metro-lx` when it starts, so list each plugin in `enabledPlugins` too (`"<plugin>@metro-<slug>": true`), or have people run `line-lx sync`. `line-lx doctor` and `line-lx list` see a marketplace declared in Claude Code's managed settings files (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux), not one from an MDM profile or server-managed settings.
 
 Two environment variables, for CI and managed machines:
 

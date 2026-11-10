@@ -69,7 +69,7 @@ func newFakeHub(t *testing.T, token string) *fakeHub {
 		case "GET /api/plugins/p1/versions":
 			fmt.Fprintf(w, `[{"id":"v-%s","version":%q,"snapshot":{"skills":[{"name":"greet","content":"hi","files":[]}]}}]`, h.version, h.version)
 		case "GET /api/connectors/claude-code/marketplace.json":
-			plugins := []any{}
+			plugins := []any{map[string]any{"name": "basics"}, map[string]any{"name": "notes"}, map[string]any{"name": "tools"}}
 			if !h.noBundle {
 				plugins = append(plugins, map[string]any{"name": bundlePlugin})
 			}
@@ -150,7 +150,8 @@ func readSettings(t *testing.T, path string) map[string]any {
 	return s
 }
 
-// wantConnected checks the settings declare the hub's marketplace, with the helper, and enable the bundle.
+// wantConnected checks the settings declare the hub's marketplace, with the helper, and enable the bundle
+// and the plugin basics.
 func wantConnected(t *testing.T, s map[string]any, hub string) {
 	t.Helper()
 	helper, err := helperCommand()
@@ -165,7 +166,7 @@ func wantConnected(t *testing.T, s map[string]any, hub string) {
 	if !reflect.DeepEqual(markets["metro-dev"], want) {
 		t.Errorf("extraKnownMarketplaces.metro-dev = %v", markets["metro-dev"])
 	}
-	if enabled, _ := s["enabledPlugins"].(map[string]any); enabled["metro-lx@metro-dev"] != true {
+	if enabled, _ := s["enabledPlugins"].(map[string]any); enabled["metro-lx@metro-dev"] != true || enabled["basics@metro-dev"] != true {
 		t.Errorf("enabledPlugins = %v", enabled)
 	}
 }
@@ -174,8 +175,9 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	hub := newFakeHub(t, "tok")
 	bin := fakeClaude(t)
 	settings := claudeEnv(t, hub)
-	writeSettings(t, settings, `{"theme":"dark","env":{"A":"1"},"enabledPlugins":{"other@elsewhere":false},
-		"statusLine":{"type":"command","command":"a && b <c>"}}`, 0o600)
+	// tools is turned off by the person; gone isn't in the hub anymore; the other marketplaces' keys stay.
+	writeSettings(t, settings, `{"theme":"dark","env":{"A":"1"},"statusLine":{"type":"command","command":"a && b <c>"},
+		"enabledPlugins":{"other@elsewhere":false,"gone@elsewhere":true,"tools@metro-dev":false,"gone@metro-dev":true}}`, 0o600)
 
 	// Round 1: Claude Code doesn't know the marketplace. line-lx declares it; Claude Code fetches it when it starts.
 	var results []*agentResult
@@ -186,8 +188,13 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	}
 	s := readSettings(t, settings)
 	wantConnected(t, s, hub.URL)
-	if s["theme"] != "dark" || s["env"].(map[string]any)["A"] != "1" || s["enabledPlugins"].(map[string]any)["other@elsewhere"] != false {
+	if s["theme"] != "dark" || s["env"].(map[string]any)["A"] != "1" {
 		t.Errorf("other settings changed: %v", s)
+	}
+	wantEnabled := map[string]any{"other@elsewhere": false, "gone@elsewhere": true, "tools@metro-dev": false,
+		"basics@metro-dev": true, "notes@metro-dev": true, "metro-lx@metro-dev": true}
+	if enabled := s["enabledPlugins"]; !reflect.DeepEqual(enabled, wantEnabled) {
+		t.Errorf("enabledPlugins = %v\nwant %v", enabled, wantEnabled)
 	}
 	if !strings.Contains(read(t, settings), `"command": "a && b <c>"`) {
 		t.Errorf("a setting was escaped:\n%s", read(t, settings))
@@ -212,21 +219,31 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 		t.Errorf("leftovers next to the settings: %v", entries)
 	}
 
-	// Round 2: Claude Code knows it now. Nothing to write; Claude Code installs what the bundle lacks.
+	// Round 2: Claude Code knows it now. Nothing to write; line-lx installs the enabled plugins it lacks,
+	// then the bundle, and not tools, which is off.
 	before := read(t, settings)
-	setClaude(t, bin, `[{"name":"metro-dev","source":"url","url":"`+marketplaceURL(hub.URL)+`"}]`, `[]`)
+	known := `[{"name":"metro-dev","source":"url","url":"` + marketplaceURL(hub.URL) + `"}]`
+	setClaude(t, bin, known, `[{"id":"basics@metro-dev","version":"1.0.0"},{"id":"notes@elsewhere","version":"1.0.0"}]`)
 	out = captureStdout(t, func() { _, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv, "plugin install -- metro-lx@metro-dev\n") {
-		t.Errorf("claude wasn't asked to install the bundle; it got:\n%s", argv)
+	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv,
+		"plugin list --json\nplugin install -- notes@metro-dev\nplugin install -- metro-lx@metro-dev\n") || strings.Contains(argv, "basics@") || strings.Contains(argv, "tools@") {
+		t.Errorf("claude wasn't asked to install the missing plugins only; it got:\n%s", argv)
 	}
 	if read(t, settings) != before {
 		t.Error("an up-to-date sync rewrote the settings")
 	}
 	if !strings.Contains(out, "claude-code  already connected: Claude Code gets Dev's plugins from the hub by itself.\n") {
 		t.Errorf("output:\n%s", out)
+	}
+
+	// Round 3: everything is installed: nothing to install.
+	setClaude(t, bin, known, `[{"id":"basics@metro-dev"},{"id":"notes@metro-dev"},{"id":"metro-lx@metro-dev"}]`)
+	captureStdout(t, func() { _, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
+	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") {
+		t.Errorf("sync = %v; claude got:\n%s", err, argv)
 	}
 
 	// The bundle must be in the hub's marketplace; without it, Claude Code is skipped, not failed.
