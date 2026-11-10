@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -191,9 +192,14 @@ func runAuthHeader() error {
 	if err != nil {
 		return err
 	}
-	// Claude Code says which marketplace or archive it asks headers for: the token only goes to its own hub.
-	for _, v := range []string{"CLAUDE_CODE_MARKETPLACE_URL", "CLAUDE_CODE_PLUGIN_ARCHIVE_URL"} {
-		if raw := os.Getenv(v); raw != "" && !sameOrigin(raw, hub) {
+	// Claude Code says which marketplace or archive it asks headers for, and the token only goes to its own
+	// hub. Without either, it isn't Claude Code asking: line-lx refuses.
+	market, archive := os.Getenv("CLAUDE_CODE_MARKETPLACE_URL"), os.Getenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL")
+	if market == "" && archive == "" {
+		return errors.New("line-lx auth-header is only for Claude Code, which runs it to sign in to the hub's marketplace.")
+	}
+	for _, raw := range []string{market, archive} {
+		if raw != "" && !onHub(raw, hub) {
 			return fmt.Errorf("%s isn't on %s, so line-lx won't give it your sign-in.", clean(raw), hub)
 		}
 	}
@@ -212,11 +218,12 @@ func runAuthHeader() error {
 	return nil
 }
 
-// sameOrigin is true when raw has the hub's scheme, host and port.
-func sameOrigin(raw, hub string) bool {
+// onHub is true when raw is on the hub: its scheme, host and port, and under its path.
+func onHub(raw, hub string) bool {
 	u, err := url.Parse(raw)
 	h, _ := url.Parse(hub)
-	return err == nil && u.User == nil && u.Scheme == h.Scheme && strings.EqualFold(u.Host, h.Host)
+	return err == nil && u.User == nil && u.Scheme == h.Scheme && strings.EqualFold(u.Host, h.Host) &&
+		strings.HasPrefix(u.EscapedPath(), h.EscapedPath()+"/") && !slices.Contains(strings.Split(u.Path, "/"), "..")
 }
 
 // --- OAuth (the hub is the provider) ---

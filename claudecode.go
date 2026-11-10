@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,9 +165,13 @@ func claudeInstalled(market string) (map[string]string, error) {
 }
 
 // claudeVersionOK says whether `claude --version` ("2.1.292 (Claude Code)") is at least minClaudeVersion.
+// A pre-release or build suffix (-beta.1, +abc) is ignored.
 func claudeVersionOK(out string) (version string, ok bool) {
 	version, _, _ = strings.Cut(strings.TrimSpace(out), " ")
 	parse := func(v string) []int {
+		if i := strings.IndexAny(v, "-+"); i >= 0 {
+			v = v[:i]
+		}
 		var nums []int
 		for _, part := range strings.Split(v, ".") {
 			n, err := strconv.Atoi(part)
@@ -237,21 +243,31 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 // plainPath is a path sh runs as written.
 var plainPath = regexp.MustCompile(`^[A-Za-z0-9_/._+@-]+$`)
 
-// helperCommand is the headersHelper Claude Code runs through sh: line-lx's absolute path, then
-// auth-header. The path is the one on the PATH, such as Homebrew's /opt/homebrew/bin/line-lx, which stays
-// the same across upgrades, else this binary's. Other paths are quoted; Claude Code takes at most 500
-// characters of printable ASCII.
+// helperCommand is the headersHelper Claude Code runs through sh: this binary's absolute path, then
+// auth-header. When the line-lx on the PATH is this same binary, its path is used instead: Homebrew's
+// /opt/homebrew/bin/line-lx stays the same across upgrades.
 func helperCommand() (string, error) {
-	path, err := exec.LookPath("line-lx")
-	if err != nil || !filepath.IsAbs(path) {
-		if path, err = os.Executable(); err != nil {
-			return "", err
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if onPath, err := exec.LookPath("line-lx"); err == nil && filepath.IsAbs(onPath) {
+		a, errA := os.Stat(onPath)
+		b, errB := os.Stat(path)
+		if errA == nil && errB == nil && os.SameFile(a, b) {
+			path = onPath
 		}
 	}
+	return helperFor(path)
+}
+
+// helperFor is the headersHelper that runs the line-lx at path. A path that isn't plain is quoted. Claude
+// Code takes a command of at most 500 characters of printable ASCII, without a run of four or more spaces.
+func helperFor(path string) (string, error) {
 	printable := !strings.ContainsFunc(path, func(r rune) bool { return r < ' ' || r > '~' || r == '\'' })
 	switch {
 	case plainPath.MatchString(path):
-	case printable && !strings.Contains(path, "    "):
+	case printable && !strings.Contains(path, "    "): // Claude Code refuses four spaces in a row
 		path = "'" + path + "'"
 	default:
 		return "", fmt.Errorf("Claude Code can't run line-lx from %q: move it to a folder whose path is plain ASCII, without quotes", clean(path))
@@ -272,32 +288,52 @@ func claudeSettingsPath() (string, error) {
 	return filepath.Join(dir, "settings.json"), nil
 }
 
-// readClaudeSettings reads Claude Code's user settings, the file's mode and its real path (settings.json
-// is often a symlink to a dotfiles repository). A missing file is empty settings; a file that isn't a JSON
-// object is refused, never replaced.
+// maxSettings caps what line-lx reads of a settings file.
+const maxSettings = 1 << 20
+
+// readClaudeSettings reads Claude Code's user settings.
 func readClaudeSettings() (s map[string]json.RawMessage, path string, mode os.FileMode, err error) {
 	path, err = claudeSettingsPath()
 	if err != nil {
 		return nil, "", 0, err
 	}
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
+	return readSettingsFile(path)
+}
+
+// readSettingsFile reads a settings file, its mode and its real path (settings.json is often a symlink to
+// a dotfiles repository). A missing file is empty settings. A file that isn't a JSON object, is over
+// maxSettings, or is a symlink to nothing is refused, never replaced.
+func readSettingsFile(path string) (s map[string]json.RawMessage, real string, mode os.FileMode, err error) {
+	real, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, "", 0, fmt.Errorf("%s is a symlink to nothing, so line-lx won't change it", path)
+		}
+		real = path
 	}
 	s, mode = map[string]json.RawMessage{}, 0o644
-	data, err := os.ReadFile(path)
+	f, err := os.Open(real)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return s, path, mode, nil
+		return s, real, mode, nil
 	case err != nil:
 		return nil, "", 0, err
 	}
-	if err := json.Unmarshal(data, &s); err != nil || s == nil {
-		return nil, "", 0, fmt.Errorf("%s isn't valid JSON, so line-lx won't change it. Fix it, then run `line-lx sync`", path)
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSettings+1))
+	switch {
+	case err != nil:
+		return nil, "", 0, err
+	case len(data) > maxSettings:
+		return nil, "", 0, fmt.Errorf("%s is over %d MiB, so line-lx won't change it", real, maxSettings>>20)
 	}
-	if info, err := os.Stat(path); err == nil {
+	if err := json.Unmarshal(data, &s); err != nil || s == nil {
+		return nil, "", 0, fmt.Errorf("%s isn't valid JSON, so line-lx won't change it. Fix it, then run `line-lx sync`", real)
+	}
+	if info, err := f.Stat(); err == nil {
 		mode = info.Mode().Perm()
 	}
-	return s, path, mode, nil
+	return s, real, mode, nil
 }
 
 // writeClaudeSettings writes settings through a temp file and a rename in the same folder, with mode.
@@ -405,37 +441,85 @@ func rawJSON(v any) json.RawMessage {
 	return bytes.TrimSpace(b.Bytes())
 }
 
-// claudeConnection reads how Claude Code's user settings connect it to the hub: the marketplace's name,
-// "" when they don't, and what's wrong with the connection, if anything.
-func claudeConnection(hub string) (name, problem string, err error) {
-	s, path, _, err := readClaudeSettings()
-	if err != nil {
-		return "", "", err
+// claudeManagedDir is where Claude Code reads its managed settings files on this OS
+// (https://code.claude.com/docs/en/managed-settings). line-lx can't see MDM profiles or server-managed settings.
+var claudeManagedDir = map[string]string{"darwin": "/Library/Application Support/ClaudeCode", "linux": "/etc/claude-code"}[runtime.GOOS]
+
+// claudeSettingsFiles are the files whose settings can connect Claude Code to the hub, the one that wins
+// first: the managed drop-ins (the last in alphabetical order wins), managed-settings.json, then the
+// person's settings.
+func claudeSettingsFiles() []string {
+	var files []string
+	if claudeManagedDir != "" {
+		dropIns, _ := filepath.Glob(filepath.Join(claudeManagedDir, "managed-settings.d", "*.json"))
+		slices.Reverse(dropIns)
+		for _, f := range dropIns {
+			if !strings.HasPrefix(filepath.Base(f), ".") { // Claude Code ignores hidden files
+				files = append(files, f)
+			}
+		}
+		files = append(files, filepath.Join(claudeManagedDir, "managed-settings.json"))
 	}
-	markets, err := settingsObject(s, "extraKnownMarketplaces", path)
-	if err != nil {
-		return "", "", err
+	if user, err := claudeSettingsPath(); err == nil {
+		files = append(files, user)
 	}
-	enabled, err := settingsObject(s, "enabledPlugins", path)
-	if err != nil {
-		return "", "", err
-	}
-	for _, key := range sortedKeys(markets) {
-		var m settingsMarket
-		if json.Unmarshal(markets[key], &m) != nil || m.Source.Source != "url" || strings.TrimRight(m.Source.URL, "/") != marketplaceURL(hub) {
-			continue
+	return files
+}
+
+// claudeConnection reads how Claude Code's settings, managed or the person's, connect it to the hub: the
+// marketplace's name ("" when they don't), the file that declares it, and what's wrong with the
+// connection, if anything. A managed file line-lx can't read is passed over.
+func claudeConnection(hub string) (name, where, problem string, err error) {
+	user, _ := claudeSettingsPath()
+	var market settingsMarket
+	enabled := map[string]json.RawMessage{} // for each plugin, the file that wins
+	for _, path := range claudeSettingsFiles() {
+		s, real, _, err := readSettingsFile(path)
+		var markets, en map[string]json.RawMessage
+		if err == nil {
+			markets, err = settingsObject(s, "extraKnownMarketplaces", real)
+		}
+		if err == nil {
+			en, err = settingsObject(s, "enabledPlugins", real)
 		}
 		switch {
-		case !strings.HasSuffix(m.Source.HeadersHelper, " auth-header"):
-			problem = "its marketplace doesn't sign in with `line-lx auth-header`"
-		case !m.AutoUpdate:
-			problem = "its marketplace doesn't auto-update"
-		case string(enabled[bundlePlugin+"@"+key]) != "true":
-			problem = bundlePlugin + "@" + key + " isn't enabled"
+		case err != nil && path == user:
+			return "", "", "", err
+		case err != nil:
+			continue
 		}
-		return key, problem, nil
+		for id, v := range en {
+			if _, ok := enabled[id]; !ok {
+				enabled[id] = v
+			}
+		}
+		for _, key := range sortedKeys(markets) {
+			var m settingsMarket
+			if name == "" && json.Unmarshal(markets[key], &m) == nil && m.Source.Source == "url" &&
+				strings.TrimRight(m.Source.URL, "/") == marketplaceURL(hub) {
+				name, where, market = key, path, m
+			}
+		}
 	}
-	return "", "", nil
+	if name == "" {
+		return "", "", "", nil
+	}
+	bin, isHelper := strings.CutSuffix(market.Source.HeadersHelper, " auth-header")
+	if unquoted, ok := strings.CutPrefix(bin, "'"); ok {
+		bin = strings.TrimSuffix(unquoted, "'")
+	}
+	_, runErr := exec.LookPath(bin)
+	switch {
+	case !isHelper:
+		problem = "its marketplace doesn't sign in with `line-lx auth-header`"
+	case runErr != nil:
+		problem = fmt.Sprintf("its marketplace runs %s, which isn't an executable file", clean(bin))
+	case !market.AutoUpdate:
+		problem = "its marketplace doesn't auto-update"
+	case string(enabled[bundlePlugin+"@"+name]) != "true":
+		problem = bundlePlugin + "@" + name + " isn't enabled"
+	}
+	return name, where, problem, nil
 }
 
 // claudeBlocked says why sync would skip Claude Code, or can't connect it, from the hub's marketplace and
@@ -453,6 +537,7 @@ func claudeBlocked(api *hubClient) error {
 	if err != nil {
 		return err
 	}
+	// A dry run on a copy: the helper doesn't matter for these checks, so it's left empty.
 	return connectSettings(s, path, cat, api.hub, oldDir, "")
 }
 
@@ -481,12 +566,12 @@ func claudeConnect(api *hubClient) (string, error) {
 	}
 
 	known, onPath := false, claudeOnPath()
+	var stale []string
 	if onPath {
 		list, err := claudeMarketplaces()
 		if err != nil {
 			return "", err
 		}
-		var stale []string
 		for _, m := range list {
 			switch {
 			case m.Name == cat.name && m.Source == "url" && strings.TrimRight(m.URL, "/") == marketplaceURL(api.hub):
@@ -545,15 +630,19 @@ func claudeConnect(api *hubClient) (string, error) {
 		_ = os.Remove(filepath.Dir(oldDir)) // only when no other hub's folder is left
 	}
 
-	gets := fmt.Sprintf("Claude Code gets %s's plugins from the hub by itself", cat.owner)
+	gets := fmt.Sprintf("Claude Code gets %s's plugins from the hub", cat.owner)
 	switch {
-	case !changed:
-		return "already connected: " + gets + ".", nil
+	case now && !changed:
+		return "already connected: " + gets + " by itself.", nil
 	case now:
-		return "connected: " + gets + ". Next: run /reload-plugins in Claude Code, or restart it.", nil
-	default:
-		return "connected: " + gets + ", from its next start.", nil
+		return "connected: " + gets + " by itself. Next: run /reload-plugins in Claude Code, or restart it.", nil
 	}
+	// Claude Code doesn't know the marketplace (yet): it fetches it when it starts.
+	msg := "connected: " + gets + " from its next start."
+	if len(stale) > 0 || old.Source.Source == "directory" {
+		msg += " The plugins line-lx installed before come back when Claude Code starts again."
+	}
+	return msg, nil
 }
 
 func isDir(path string) bool {

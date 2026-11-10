@@ -18,8 +18,8 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// TestMain keeps every test away from the person's own agents: a home folder of its own, and no
-// CLAUDE_CONFIG_DIR, so Claude Code's settings are <home>/.claude/settings.json.
+// TestMain keeps every test away from the person's own agents: a home folder of its own, no
+// CLAUDE_CONFIG_DIR, so Claude Code's settings are <home>/.claude/settings.json, and no managed settings.
 func TestMain(m *testing.M) {
 	home, err := os.MkdirTemp("", "line-lx-test-home")
 	if err != nil {
@@ -27,6 +27,7 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("HOME", home)
 	os.Unsetenv("CLAUDE_CONFIG_DIR")
+	claudeManagedDir = filepath.Join(home, "managed")
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)
@@ -197,7 +198,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if argv := read(t, filepath.Join(bin, "argv")); argv != "plugin marketplace list --json\n" {
 		t.Errorf("claude got more than the list:\n%s", argv)
 	}
-	want := "claude-code  connected: Claude Code gets Dev's plugins from the hub by itself, from its next start.\n"
+	want := "claude-code  connected: Claude Code gets Dev's plugins from the hub from its next start.\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("output lacks %q:\n%s", want, out)
 	}
@@ -282,7 +283,7 @@ func TestSyncClaudeCodeMigratesFromTheFolder(t *testing.T) {
 	if exists(oldDir) || exists(filepath.Dir(oldDir)) {
 		t.Error("line-lx's former folder is still there")
 	}
-	if !strings.Contains(out, "from its next start") {
+	if !strings.Contains(out, "from its next start. The plugins line-lx installed before come back when Claude Code starts again.") {
 		t.Errorf("output:\n%s", out)
 	}
 }
@@ -306,7 +307,7 @@ func TestSyncClaudeCodeWithoutCLI(t *testing.T) {
 	if !exists(oldDir) {
 		t.Error("the former folder went before Claude Code stopped reading it")
 	}
-	if !strings.Contains(out, "connected: Claude Code gets Dev's plugins from the hub by itself, from its next start.") {
+	if !strings.Contains(out, "connected: Claude Code gets Dev's plugins from the hub from its next start.") {
 		t.Errorf("output:\n%s", out)
 	}
 }
@@ -321,6 +322,7 @@ func TestSyncClaudeCodeLeavesSettingsAlone(t *testing.T) {
 		"not an object":        {settings: `[1, 2]`},
 		"markets not object":   {settings: `{"extraKnownMarketplaces":[]}`},
 		"enabled not object":   {settings: `{"enabledPlugins":"yes"}`},
+		"over the size cap":    {settings: `{"x":"` + strings.Repeat("a", maxSettings) + `"}`},
 		"clash in settings":    {settings: `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"github","repo":"acme/plugins"}}}}`, skipped: true},
 		"clash in Claude Code": {settings: `{}`, markets: `[{"name":"metro-dev","source":"github"}]`, skipped: true},
 	} {
@@ -371,62 +373,102 @@ func TestClaudeSettingsThroughSymlink(t *testing.T) {
 	if info, _ := os.Stat(dotfiles); info.Mode().Perm() != 0o640 {
 		t.Errorf("mode = %v", info.Mode().Perm())
 	}
+
+	// A symlink to nothing is refused, and stays.
+	if err := os.Remove(dotfiles); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if _, err := syncAll(&hubClient{hub: hub.URL, token: "tok"}); err == nil {
+			t.Error("sync wrote through a symlink to nothing")
+		}
+	})
+	if info, err := os.Lstat(settings); err != nil || info.Mode()&os.ModeSymlink == 0 || exists(dotfiles) {
+		t.Error("the dangling settings symlink was replaced or followed")
+	}
 }
 
 func TestClaudeConnection(t *testing.T) {
 	hub := newFakeHub(t, "tok")
 	settings := claudeEnv(t, hub)
-	url := marketplaceURL(hub.URL)
-	for want, data := range map[[2]string]string{
-		{"", ""}:          `{}`,
-		{"metro-dev", ""}: `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"url","url":"` + url + `","headersHelper":"/x/line-lx auth-header"},"autoUpdate":true}},"enabledPlugins":{"metro-lx@metro-dev":true}}`,
-		{"metro-dev", "its marketplace doesn't sign in with `line-lx auth-header`"}: `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"url","url":"` + url + `"},"autoUpdate":true}}}`,
-		{"metro-dev", "its marketplace doesn't auto-update"}:                        `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"url","url":"` + url + `","headersHelper":"/x/line-lx auth-header"}}}}`,
-		{"metro-dev", "metro-lx@metro-dev isn't enabled"}:                           `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"url","url":"` + url + `","headersHelper":"/x/line-lx auth-header"},"autoUpdate":true}},"enabledPlugins":{"metro-lx@metro-dev":false}}`,
+	exe := filepath.Join(t.TempDir(), "line-lx")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := func(helper, extra string) string {
+		return `{"extraKnownMarketplaces":{"metro-dev":{"source":{"source":"url","url":"` + marketplaceURL(hub.URL) +
+			`","headersHelper":"` + helper + `"}` + extra + `}}}`
+	}
+	good := entry(exe+" auth-header", `,"autoUpdate":true`)
+	for _, c := range []struct{ data, name, problem string }{
+		{`{}`, "", ""},
+		{good[:len(good)-1] + `,"enabledPlugins":{"metro-lx@metro-dev":true}}`, "metro-dev", ""},
+		{entry("", `,"autoUpdate":true`), "metro-dev", "its marketplace doesn't sign in with `line-lx auth-header`"},
+		{entry("/nowhere/line-lx auth-header", `,"autoUpdate":true`), "metro-dev", "its marketplace runs /nowhere/line-lx, which isn't an executable file"},
+		{entry(exe+" auth-header", ""), "metro-dev", "its marketplace doesn't auto-update"},
+		{good[:len(good)-1] + `,"enabledPlugins":{"metro-lx@metro-dev":false}}`, "metro-dev", "metro-lx@metro-dev isn't enabled"},
 	} {
-		writeSettings(t, settings, data, 0o644)
-		if name, problem, err := claudeConnection(hub.URL); err != nil || name != want[0] || problem != want[1] {
-			t.Errorf("%s: %q, %q, %v", data, name, problem, err)
+		writeSettings(t, settings, c.data, 0o644)
+		if name, where, problem, err := claudeConnection(hub.URL); err != nil || name != c.name || problem != c.problem || name != "" && where != settings {
+			t.Errorf("%s: %q, %q, %q, %v", c.data, name, where, problem, err)
 		}
+	}
+
+	// Managed settings: they declare the marketplace, the person's settings enable the bundle. An unreadable
+	// managed file is passed over.
+	old := claudeManagedDir
+	claudeManagedDir = t.TempDir()
+	t.Cleanup(func() { claudeManagedDir = old })
+	managed := filepath.Join(claudeManagedDir, "managed-settings.d", "10-metro.json")
+	writeSettings(t, managed, good, 0o644)
+	writeSettings(t, filepath.Join(claudeManagedDir, "managed-settings.json"), `not json`, 0o644)
+	writeSettings(t, settings, `{"enabledPlugins":{"metro-lx@metro-dev":true}}`, 0o644)
+	if name, where, problem, err := claudeConnection(hub.URL); err != nil || name != "metro-dev" || where != managed || problem != "" {
+		t.Errorf("managed: %q, %q, %q, %v", name, where, problem, err)
+	}
+	// The managed value wins over the person's.
+	writeSettings(t, managed, good[:len(good)-1]+`,"enabledPlugins":{"metro-lx@metro-dev":false}}`, 0o644)
+	if _, _, problem, _ := claudeConnection(hub.URL); problem != "metro-lx@metro-dev isn't enabled" {
+		t.Errorf("managed false: %q", problem)
 	}
 }
 
 func TestHelperCommand(t *testing.T) {
-	for dir, want := range map[string]string{
-		"bin":              "%s/line-lx auth-header",
-		"with space":       "'%s/line-lx' auth-header",
-		"Program_Files+1@": "%s/line-lx auth-header",
+	for path, want := range map[string]string{
+		"/opt/homebrew/bin/line-lx":           "/opt/homebrew/bin/line-lx auth-header",
+		"/home/a_b/Program_Files+1@/line-lx":  "/home/a_b/Program_Files+1@/line-lx auth-header",
+		"/Users/me/My Tools/line-lx":          "'/Users/me/My Tools/line-lx' auth-header",
+		"/Users/me/it's/line-lx":              "",
+		"/Users/me/tab\there/line-lx":         "",
+		"/Users/me/é/line-lx":                 "",
+		"/Users/me/four    spaces/line-lx":    "",
+		"/" + strings.Repeat("a", 500) + "/x": "",
 	} {
-		path := filepath.Join(t.TempDir(), dir)
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "line-lx"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", path)
-		if got, err := helperCommand(); err != nil || got != fmt.Sprintf(want, path) {
-			t.Errorf("%s: %q, %v", dir, got, err)
+		got, err := helperFor(path)
+		if got != want || (err == nil) != (want != "") {
+			t.Errorf("%q: %q, %v", path, got, err)
 		}
 	}
-	for _, dir := range []string{"it's", "tab\there", "é"} {
-		path := filepath.Join(t.TempDir(), dir)
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "line-lx"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", path)
-		if got, err := helperCommand(); err == nil {
-			t.Errorf("%q: accepted as %q", dir, got)
-		}
+
+	// This binary, unless the line-lx on the PATH is this same file: then its path on the PATH.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Not on the PATH: this binary.
-	t.Setenv("PATH", t.TempDir())
-	exe, _ := os.Executable()
-	if got, err := helperCommand(); err != nil || !strings.Contains(got, filepath.Base(exe)) {
-		t.Errorf("without line-lx on PATH: %q, %v", got, err)
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "line-lx"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	same := t.TempDir()
+	if err := os.Symlink(exe, filepath.Join(same, "line-lx")); err != nil {
+		t.Fatal(err)
+	}
+	for dir, want := range map[string]string{other: exe, same: filepath.Join(same, "line-lx")} {
+		t.Setenv("PATH", dir)
+		wantCmd, _ := helperFor(want)
+		if got, err := helperCommand(); err != nil || got != wantCmd {
+			t.Errorf("PATH %s: %q, %v; want %q", dir, got, err, wantCmd)
+		}
 	}
 }
 
@@ -434,9 +476,12 @@ func TestClaudeVersionOK(t *testing.T) {
 	for out, want := range map[string]bool{
 		"2.1.292 (Claude Code)\n": true,
 		"2.1.238 (Claude Code)":   true,
+		"2.1.300-beta.1":          true,
+		"2.1.238+build.5":         true,
 		"2.2.0":                   true,
 		"3.0.0":                   true,
 		"2.1.237 (Claude Code)":   false,
+		"2.1.237-rc.1":            false,
 		"2.0.999":                 false,
 		"1.9.300":                 false,
 		"2.1":                     false,
@@ -528,14 +573,14 @@ func TestBearerKeepsTokenOnItsHub(t *testing.T) {
 func TestSetupSummary(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	got := setupSummary("https://hub.example.com", []*agentResult{
-		{name: claudeTarget, connected: "connected: Claude Code gets Dev's plugins from the hub by itself, from its next start."},
+		{name: claudeTarget, connected: "connected: Claude Code gets Dev's plugins from the hub from its next start."},
 		{name: "pi", where: filepath.Join(home, ".pi", "agent", "skills"), current: 3},
 		{name: "codex", where: "/x", delivered: 1, failed: 1},
 		{name: claudeTarget, skipped: "the hub has no Claude Code marketplace yet"},
 		{name: claudeTarget, failed: 1},
 	})
 	for _, want := range []string{
-		"Claude Code  connected: Claude Code gets Dev's plugins from the hub by itself, from its next start.\n",
+		"Claude Code  connected: Claude Code gets Dev's plugins from the hub from its next start.\n",
 		"pi           3 plugins in ~/.pi/agent/skills. Nothing new.\n", // no next step
 		"Codex        1 plugin in /x. 1 failed: see above, or run `line-lx doctor`. Next: start a new Codex session.\n",
 		"Claude Code  nothing installed: the hub has no Claude Code marketplace yet.\n",

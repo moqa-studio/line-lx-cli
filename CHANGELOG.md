@@ -8,13 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `auth-header` prints your sign-in as an HTTP header, `{"Authorization":"Bearer <token>"}`: Claude Code runs it to sign in to the hub. It refuses a marketplace or an archive that isn't on the current hub.
+- `auth-header` prints your sign-in as an HTTP header, `{"Authorization":"Bearer <token>"}`: Claude Code runs it to sign in to the hub. It answers only when Claude Code names the marketplace or archive it asks for, and only when that is under the current hub's URL.
 
 ### Changed
 
-- Claude Code gets the plugins from the hub's marketplace by itself. `setup` and `sync` connect it once, in its user settings: the hub's marketplace, signed in with `line-lx auth-header` and auto-updated, and the hub's `metro-lx` plugin, which depends on all the others. This needs Claude Code 2.1.238 or later, and a hub that serves `metro-lx`.
-- `sync` moves Claude Code off the local marketplace that earlier versions wrote, then deletes its folder, `<config dir>/line-lx/claude-code/`.
-- `doctor` checks Claude Code's connection to the hub and its version. `list` shows what Claude Code installed from the hub.
+- Claude Code gets the plugins from the hub's marketplace by itself. `setup` and `sync` connect it once, in its user settings: the hub's marketplace, signed in with `line-lx auth-header` and auto-updated, and the hub's `metro-lx` plugin, which depends on all the others. This needs Claude Code 2.1.238 or later, and a hub that serves `metro-lx`. The first time, the plugins come in a new Claude Code session, because `claude plugin marketplace add` refuses a marketplace whose settings entry has a `headersHelper`.
+- `sync` moves Claude Code off the local marketplace that earlier versions wrote, then deletes its folder, `<config dir>/line-lx/claude-code/`. The plugins come back when Claude Code starts again.
+- `doctor` checks Claude Code's connection to the hub, in its settings or its managed settings files, the `line-lx` it runs, and its version. `list` shows what Claude Code installed from the hub.
 - Claude Code is found by its folder, `~/.claude` or `$CLAUDE_CONFIG_DIR`, as well as by `claude` on the PATH.
 
 ### Removed

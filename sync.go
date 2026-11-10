@@ -261,7 +261,7 @@ func runList() error {
 	}
 	if claudeDetected() {
 		found = true
-		market, _, err := claudeConnection(hub)
+		market, _, _, err := claudeConnection(hub)
 		switch {
 		case err != nil:
 			fmt.Printf("%s\n  can't read its settings: %v\n", claudeTarget, err)
@@ -373,7 +373,7 @@ func runDoctor() error {
 	} else {
 		found = true
 		settings, _ := claudeSettingsPath()
-		market, problem, err := claudeConnection(hub)
+		market, where, problem, err := claudeConnection(hub)
 		if err == nil && market == "" && api != nil {
 			err = claudeBlocked(api) // the same checks as sync: a reason to skip isn't a failure
 		}
@@ -384,10 +384,12 @@ func runDoctor() error {
 			check(claudeTarget, false, err.Error())
 		case market == "":
 			check(claudeTarget, false, settings+" · not connected to the hub: run `line-lx sync`")
+		case problem != "" && where != settings:
+			check(claudeTarget, false, where+" · "+problem+": ask who manages Claude Code's managed settings")
 		case problem != "":
-			check(claudeTarget, false, settings+" · "+problem+": run `line-lx sync`")
+			check(claudeTarget, false, where+" · "+problem+": run `line-lx sync`")
 		default:
-			check(claudeTarget, true, settings+" · connected: Claude Code gets the hub's plugins as "+bundlePlugin+"@"+market)
+			check(claudeTarget, true, where+" · connected: Claude Code gets the hub's plugins as "+bundlePlugin+"@"+market)
 		}
 		// A warning, not a failure: line-lx can't tell the Claude Code of the desktop app or an IDE.
 		if claudeOnPath() {

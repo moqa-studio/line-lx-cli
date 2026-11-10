@@ -66,7 +66,7 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx sync` | Writes the newest version of each plugin to Codex and pi, removes the ones gone from the hub, and reports each delivery to the hub. Connects Claude Code to the hub. Exit 1 if a target failed or no agent is found. |
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
 | `line-lx doctor` | Checks the hub, your sign-in and each agent. Exit 1 when something is wrong. |
-| `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Claude Code runs it to sign in to the hub. |
+| `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Only for Claude Code, which runs it to sign in to the hub. |
 | `line-lx --version` | Prints the version. |
 
 Agents are used only when found on the machine: Claude Code (`~/.claude` exists, or `claude` is on the PATH), Codex (`~/.codex` exists) and pi (`~/.pi/agent` exists). line-lx only changes folders carrying its stamp, and only for the hub that wrote them.
@@ -78,9 +78,9 @@ Claude Code gets the plugins from the hub's marketplace by itself. `line-lx setu
 - the hub's marketplace, `metro-<workspace>`, fetched from `<hub>/api/connectors/claude-code/marketplace.json` with auto-update on. Its `headersHelper` is `<path to line-lx> auth-header`, so Claude Code sends your sign-in to the hub.
 - the plugin `metro-lx@metro-<workspace>`, enabled. It depends on every plugin of your workspace, so Claude Code installs the new ones, updates them and removes the ones gone from the hub.
 
-Claude Code fetches the marketplace when it starts. It needs version 2.1.238 or later. line-lx keeps the other settings as they are, and leaves Claude Code alone when it already has another marketplace under the hub's name.
+Claude Code fetches the marketplace when it starts, and needs version 2.1.238 or later. The first time, the plugins come in a new Claude Code session: `claude plugin marketplace add` refuses a marketplace whose settings entry has a `headersHelper`, so line-lx can't add it to the running Claude Code. line-lx keeps the other settings, but rewrites `settings.json` formatted, with its keys sorted. It leaves Claude Code alone when it already has another marketplace under the hub's name.
 
-`line-lx auth-header` gives your sign-in only to your current hub: when Claude Code names a marketplace or an archive on another origin (`CLAUDE_CODE_MARKETPLACE_URL`, `CLAUDE_CODE_PLUGIN_ARCHIVE_URL`), it refuses. It refreshes the sign-in when needed, and stops after 9 seconds.
+`line-lx auth-header` answers only Claude Code, which names the marketplace or archive it asks headers for (`CLAUDE_CODE_MARKETPLACE_URL`, `CLAUDE_CODE_PLUGIN_ARCHIVE_URL`), and gives your sign-in only to your current hub: every URL named must be under the hub's URL. It refreshes the sign-in when needed, and stops after 9 seconds.
 
 Admins can connect Claude Code on every machine with [managed settings](https://code.claude.com/docs/en/managed-settings) instead. Each person still needs line-lx on the PATH and signed in (`line-lx login`):
 
@@ -96,7 +96,7 @@ Admins can connect Claude Code on every machine with [managed settings](https://
 }
 ```
 
-`<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx.
+`<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx. `line-lx doctor` and `line-lx list` see a marketplace declared in Claude Code's managed settings files (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux), not one from an MDM profile or server-managed settings.
 
 Two environment variables, for CI and managed machines:
 
