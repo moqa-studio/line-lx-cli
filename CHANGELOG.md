@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-10
+
 ### Added
 
 - `auth-header` prints your sign-in as an HTTP header, `{"Authorization":"Bearer <token>"}`: Claude Code runs it to sign in to the hub. It answers only when Claude Code names the marketplace or archive it asks for, and only when that is under the current hub's URL.
@@ -36,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moqa-studio/line-lx-cli/releases/tag/v0.1.0
