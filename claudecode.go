@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,38 +12,62 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// --- Claude Code: line-lx writes the hub's marketplace to a local folder; the `claude` CLI installs from it. ---
+// --- Claude Code: it gets the hub's plugins from the hub's marketplace by itself. ---
 //
-// The hub's marketplace and its plugin archives need the person's token, which Claude Code can't send. So
-// line-lx fetches them with its own, checks each archive against the marketplace's sha256, and writes a
-// directory marketplace Claude Code reads: <config dir>/line-lx/claude-code/<hub id>/, holding
-// .claude-plugin/marketplace.json and plugins/<name>/. Claude Code reads a directory marketplace's plugins
-// from that folder, and `claude plugin update` records a new version written there (Claude Code 2.1.292).
+// line-lx connects Claude Code once. In its user settings, it declares the hub's marketplace, a url source
+// whose headersHelper is `line-lx auth-header`, so Claude Code sends the person's token with each fetch, and
+// turns on its auto-update. It enables each plugin of the marketplace, and the hub's bundle plugin,
+// metro-lx, which depends on every plugin of the workspace: Claude Code installs, updates and removes them
+// by itself (Claude Code 2.1.238 or later), and gets a plugin published later through the bundle.
+//
+// Claude Code fetches a marketplace its settings declare when it starts, and downloads the enabled plugins
+// it lacks, but not the bundle's dependencies. `claude plugin marketplace add` refuses a marketplace whose
+// settings entry has a headersHelper (Claude Code 2.1.292), so line-lx installs through `claude` only once
+// Claude Code knows the marketplace. Its dependency install brings one missing plugin per run (2.1.292),
+// so line-lx installs each missing plugin itself.
 
-const claudeRestart = "Claude Code loads plugins on launch: run /reload-plugins in it, or restart it"
+// bundlePlugin is the hub's plugin that depends on all the others.
+const bundlePlugin = "metro-lx"
 
-// Limits on one plugin archive. The hub takes at most 2 MB per version, so these leave plenty of room.
-const (
-	maxArchive        = 16 << 20 // as downloaded
-	maxArchiveEntry   = 16 << 20 // one file, uncompressed
-	maxArchiveTotal   = 64 << 20 // all files, uncompressed
-	maxArchiveEntries = 5000
-)
+// minClaudeVersion is the first Claude Code that runs a marketplace's headersHelper.
+const minClaudeVersion = "2.1.238"
 
-func claudeDetected() (string, bool) {
-	path, err := exec.LookPath("claude")
-	return path, err == nil
+// claudeOnPath is true when the claude CLI is on the PATH.
+func claudeOnPath() bool {
+	_, err := exec.LookPath("claude")
+	return err == nil
 }
 
-// claudeDir is the hub's marketplace folder, named by a hash of the hub URL: one folder per hub, and a
-// plain folder name whatever the URL.
+// claudeConfigDir is Claude Code's configuration folder: $CLAUDE_CONFIG_DIR, else ~/.claude.
+func claudeConfigDir() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
+}
+
+// claudeDetected is true when Claude Code is on this machine: its CLI, or its configuration folder (the
+// desktop app and the IDE extensions have no CLI on the PATH).
+func claudeDetected() bool {
+	dir, err := claudeConfigDir()
+	return claudeOnPath() || err == nil && isDir(dir)
+}
+
+// claudeDir is the folder where line-lx used to write the hub's marketplace for Claude Code, named by a
+// hash of the hub URL. line-lx removes it once Claude Code gets the plugins from the hub.
 func claudeDir(hub string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -67,13 +90,16 @@ func durationText(d time.Duration) string {
 	return d.String()
 }
 
-// marketplaceURL is the hub's marketplace. A marketplace added to Claude Code by this URL can't
-// authenticate (Claude Code sends no token), so sync removes it.
+// marketplaceURL is the hub's Claude Code marketplace.
 func marketplaceURL(hub string) string { return hub + "/api/connectors/claude-code/marketplace.json" }
 
 // claudeTimeout bounds one `claude` call: a stalled one (a marketplace update on a dead network, a
 // prompt it can't show) must not hold line-lx, nor the agent that runs it.
 var claudeTimeout = 2 * time.Minute
+
+// claudeInstallWait bounds the installs of one sync: line-lx starts no install past it, and the plugins
+// left come at Claude Code's next start.
+var claudeInstallWait = 3 * time.Minute
 
 // claude runs the claude CLI; on failure the error carries its stderr. Callers put `--` before
 // positional arguments, so a name can never be read as a flag. Its stdin is empty: it never prompts.
@@ -120,60 +146,59 @@ func claudeMarketplaces() ([]claudeMarketplaceEntry, error) {
 	return list, nil
 }
 
-func (m claudeMarketplaceEntry) isFolder(dir string) bool {
-	return m.Source == "directory" && m.Path != "" && filepath.Clean(m.Path) == dir
+// ours is true for the hub's marketplace, and for the folder line-lx used to write it to.
+func (m claudeMarketplaceEntry) ours(hub, oldDir string) bool {
+	return m.Source == "url" && strings.TrimRight(m.URL, "/") == marketplaceURL(hub) ||
+		m.Source == "directory" && m.Path != "" && filepath.Clean(m.Path) == oldDir
 }
 
-// claudeMarketplace finds the hub's marketplace among Claude Code's, by its folder. Empty when not added.
-func claudeMarketplace(hub string) (string, error) {
-	dir, err := claudeDir(hub)
-	if err != nil {
-		return "", err
-	}
-	list, err := claudeMarketplaces()
-	if err != nil {
-		return "", err
-	}
-	for _, m := range list {
-		if m.isFolder(dir) {
-			if !validName(m.Name) {
-				return "", fmt.Errorf("the hub's marketplace is added under an invalid name %q", clean(m.Name))
-			}
-			return m.Name, nil
-		}
-	}
-	return "", nil
-}
-
-// claudeInstalled maps the plugins Claude Code installed from the marketplace to their versions, and the
-// ones it synced from the person's claude.ai account to theirs. Claude Code lists a synced plugin with
-// the scope "synced" and the id <name>@synced (2.1.292): with the Claude connector, the workspace's
-// plugins, under the same names.
-func claudeInstalled(market string) (installed, synced map[string]string, err error) {
+// claudeInstalled maps the plugins Claude Code installed from the marketplace to their versions.
+func claudeInstalled(market string) (map[string]string, error) {
 	out, err := claude("plugin", "list", "--json")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	var list []struct{ ID, Version, Scope string }
+	var list []struct{ ID, Version string }
 	if err := json.Unmarshal(out, &list); err != nil {
-		return nil, nil, fmt.Errorf("can't read `claude plugin list --json`: %v", err)
+		return nil, fmt.Errorf("can't read `claude plugin list --json`: %v", err)
 	}
-	installed, synced = map[string]string{}, map[string]string{}
+	installed := map[string]string{}
 	for _, p := range list {
-		name, m, ok := strings.Cut(p.ID, "@")
-		switch {
-		case !ok || !validName(name):
-		case p.Scope == "synced" || p.Scope == "" && m == "synced":
-			synced[name] = p.Version
-		case m == market:
+		if name, m, ok := strings.Cut(p.ID, "@"); ok && m == market && validName(name) {
 			installed[name] = p.Version
 		}
 	}
-	return installed, synced, nil
+	return installed, nil
 }
 
-// errNoMarketplace: the hub doesn't serve a Claude Code marketplace (yet). Not a failure: sync skips the target.
-var errNoMarketplace = errors.New("the hub has no Claude Code marketplace yet")
+// claudeVersionOK says whether `claude --version` ("2.1.292 (Claude Code)") is at least minClaudeVersion.
+// A pre-release or build suffix (-beta.1, +abc) is ignored.
+func claudeVersionOK(out string) (version string, ok bool) {
+	version, _, _ = strings.Cut(strings.TrimSpace(out), " ")
+	parse := func(v string) []int {
+		if i := strings.IndexAny(v, "-+"); i >= 0 {
+			v = v[:i]
+		}
+		var nums []int
+		for _, part := range strings.Split(v, ".") {
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return nil
+			}
+			nums = append(nums, n)
+		}
+		return nums
+	}
+	have, want := parse(version), parse(minClaudeVersion)
+	return clean(version), len(have) == 3 && slices.Compare(have, want) >= 0
+}
+
+// errNoMarketplace and errNoBundle: the hub doesn't serve what Claude Code needs (yet). Not a failure:
+// sync skips the target.
+var (
+	errNoMarketplace = errors.New("the hub has no Claude Code marketplace yet")
+	errNoBundle      = errors.New("the hub's Claude Code marketplace has no " + bundlePlugin + " plugin yet: the hub needs an update")
+)
 
 // errMarketplaceClash: Claude Code already has another marketplace under the hub's marketplace name, for
 // example the Claude connector's GitHub repository added by hand. Adding ours would replace it, so line-lx
@@ -185,25 +210,27 @@ func (e errMarketplaceClash) Error() string {
 		"To get the plugins from line-lx instead, run `claude plugin marketplace remove %s`, then `line-lx sync`", e.name, clean(e.from), e.name)
 }
 
-// hubCatalog is the hub's marketplace.json, kept whole: the copy line-lx writes changes only each plugin's source.
+// claudeSkipped is true for the reasons sync skips Claude Code instead of failing.
+func claudeSkipped(err error) bool {
+	var clash errMarketplaceClash
+	return errors.Is(err, errNoMarketplace) || errors.Is(err, errNoBundle) || errors.As(err, &clash)
+}
+
+// hubCatalog is what line-lx needs from the hub's marketplace: its name, its owner (the workspace), and
+// its plugins but the bundle, without the names line-lx refuses (in refused).
 type hubCatalog struct {
-	name    string
-	doc     map[string]json.RawMessage
-	plugins []catalogPlugin
+	name, owner      string
+	plugins, refused []string
 }
 
-type catalogPlugin struct {
-	name, url, sha256 string
-	entry             map[string]json.RawMessage
-	err               error // the entry is unusable: the plugin fails, the others go on
-}
-
-var sha256Rule = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-// hubMarketplace fetches the hub's Claude Code marketplace (errNoMarketplace on 404). Entries without a
-// valid name are dropped; an entry line-lx can't fetch carries its error.
+// hubMarketplace fetches the hub's Claude Code marketplace (errNoMarketplace on 404, errNoBundle without
+// the bundle plugin).
 func hubMarketplace(api *hubClient) (*hubCatalog, error) {
-	var doc map[string]json.RawMessage
+	var doc struct {
+		Name    string
+		Owner   struct{ Name string }
+		Plugins []struct{ Name string }
+	}
 	if err := api.do("GET", "/api/connectors/claude-code/marketplace.json", nil, &doc); err != nil {
 		var ae *apiError
 		if errors.As(err, &ae) && ae.status == http.StatusNotFound {
@@ -211,330 +238,489 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 		}
 		return nil, err
 	}
-	cat := &hubCatalog{doc: doc}
-	var entries []map[string]json.RawMessage
-	if json.Unmarshal(doc["name"], &cat.name) != nil || !validName(cat.name) || json.Unmarshal(doc["plugins"], &entries) != nil {
-		return nil, fmt.Errorf("the hub's marketplace has no valid name or plugin list")
+	if !validName(doc.Name) {
+		return nil, errors.New("the hub's marketplace has no valid name")
 	}
-	seen := map[string]bool{}
-	for _, entry := range entries {
-		p := catalogPlugin{entry: entry}
-		if json.Unmarshal(entry["name"], &p.name) != nil || !validName(p.name) || seen[p.name] {
-			continue
+	cat := &hubCatalog{name: doc.Name, owner: clean(doc.Owner.Name)}
+	if cat.owner == "" {
+		cat.owner = "your workspace"
+	}
+	bundle := false
+	for _, p := range doc.Plugins {
+		switch {
+		case p.Name == bundlePlugin:
+			bundle = true
+		case !validName(p.Name):
+			cat.refused = append(cat.refused, clean(p.Name))
+		case !slices.Contains(cat.plugins, p.Name):
+			cat.plugins = append(cat.plugins, p.Name)
 		}
-		seen[p.name] = true
-		var src struct{ Source, URL, Sha256 string }
-		if err := json.Unmarshal(entry["source"], &src); err != nil || src.Source != "archive" || !sha256Rule.MatchString(src.Sha256) {
-			p.err = errors.New("the hub's marketplace has no archive with a sha256 for it")
-		}
-		p.url, p.sha256 = src.URL, src.Sha256
-		cat.plugins = append(cat.plugins, p)
+	}
+	if !bundle {
+		return nil, errNoBundle
 	}
 	return cat, nil
 }
 
-// claudeMarket is the hub's marketplace as line-lx wrote it on this machine.
-type claudeMarket struct {
-	name   string          // the name Claude Code knows it by
-	dir    string          // its folder
-	listed map[string]bool // the plugins in its marketplace.json
-	failed map[string]error
+// plainPath is a path sh runs as written.
+var plainPath = regexp.MustCompile(`^[A-Za-z0-9_/._+@-]+$`)
+
+// helperCommand is the headersHelper Claude Code runs through sh: this binary's absolute path, then
+// auth-header. When the line-lx on the PATH is this same binary, its path is used instead: Homebrew's
+// /opt/homebrew/bin/line-lx stays the same across upgrades.
+func helperCommand() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if onPath, err := exec.LookPath("line-lx"); err == nil && filepath.IsAbs(onPath) {
+		a, errA := os.Stat(onPath)
+		b, errB := os.Stat(path)
+		if errA == nil && errB == nil && os.SameFile(a, b) {
+			path = onPath
+		}
+	}
+	return helperFor(path)
 }
 
-// claudePrepare writes the hub's marketplace to its folder and makes sure Claude Code knows it, with its
-// latest catalog. A plugin whose new version can't be written is in failed; its folder keeps the
-// previous version, if any.
-func claudePrepare(api *hubClient) (*claudeMarket, error) {
-	cat, err := hubMarketplace(api)
-	if err != nil {
-		return nil, err
+// helperFor is the headersHelper that runs the line-lx at path. A path that isn't plain is quoted. Claude
+// Code takes a command of at most 500 characters of printable ASCII, without a run of four or more spaces.
+func helperFor(path string) (string, error) {
+	printable := !strings.ContainsFunc(path, func(r rune) bool { return r < ' ' || r > '~' || r == '\'' })
+	switch {
+	case plainPath.MatchString(path):
+	case printable && !strings.Contains(path, "    "): // Claude Code refuses four spaces in a row
+		path = "'" + path + "'"
+	default:
+		return "", fmt.Errorf("Claude Code can't run line-lx from %q: move it to a folder whose path is plain ASCII, without quotes", clean(path))
 	}
-	dir, err := claudeDir(api.hub)
-	if err != nil {
-		return nil, err
+	if cmd := path + " auth-header"; len(cmd) <= 500 {
+		return cmd, nil
 	}
-	ours, stale, err := claudeFind(api.hub, dir, cat.name)
-	if err != nil {
-		return nil, err
-	}
+	return "", fmt.Errorf("Claude Code can't run line-lx from %s: the path is too long", clean(path))
+}
 
-	listed, failed, err := writeMarketplace(api, cat, dir)
+// --- Claude Code's user settings ---
+
+func claudeSettingsPath() (string, error) {
+	dir, err := claudeConfigDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	for _, name := range stale {
-		if !validName(name) {
+	return filepath.Join(dir, "settings.json"), nil
+}
+
+// maxSettings caps what line-lx reads of a settings file.
+const maxSettings = 1 << 20
+
+// readClaudeSettings reads Claude Code's user settings.
+func readClaudeSettings() (s map[string]json.RawMessage, path string, mode os.FileMode, err error) {
+	path, err = claudeSettingsPath()
+	if err != nil {
+		return nil, "", 0, err
+	}
+	return readSettingsFile(path)
+}
+
+// readSettingsFile reads a settings file, its mode and its real path (settings.json is often a symlink to
+// a dotfiles repository). A missing file is empty settings. A file that isn't a JSON object, is over
+// maxSettings, or is a symlink to nothing is refused, never replaced.
+func readSettingsFile(path string) (s map[string]json.RawMessage, real string, mode os.FileMode, err error) {
+	real, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, "", 0, fmt.Errorf("%s is a symlink to nothing, so line-lx won't change it", path)
+		}
+		real = path
+	}
+	s, mode = map[string]json.RawMessage{}, 0o644
+	f, err := os.Open(real)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return s, real, mode, nil
+	case err != nil:
+		return nil, "", 0, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSettings+1))
+	switch {
+	case err != nil:
+		return nil, "", 0, err
+	case len(data) > maxSettings:
+		return nil, "", 0, fmt.Errorf("%s is over %d MiB, so line-lx won't change it", real, maxSettings>>20)
+	}
+	if err := json.Unmarshal(data, &s); err != nil || s == nil {
+		return nil, "", 0, fmt.Errorf("%s isn't valid JSON, so line-lx won't change it. Fix it, then run `line-lx sync`", real)
+	}
+	if info, err := f.Stat(); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return s, real, mode, nil
+}
+
+// writeClaudeSettings writes settings through a temp file and a rename in the same folder, with mode.
+func writeClaudeSettings(s map[string]json.RawMessage, path string, mode os.FileMode) error {
+	var data bytes.Buffer
+	if err := json.Indent(&data, rawJSON(s), "", "  "); err != nil {
+		return err
+	}
+	data.WriteByte('\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings.json.line-lx-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // a no-op once renamed
+	_, err = tmp.Write(data.Bytes())
+	if err == nil {
+		err = tmp.Chmod(mode)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// settingsObject reads one of the settings' objects; an absent key is an empty one.
+func settingsObject(s map[string]json.RawMessage, key, path string) (map[string]json.RawMessage, error) {
+	out := map[string]json.RawMessage{}
+	if raw, ok := s[key]; ok && (json.Unmarshal(raw, &out) != nil || out == nil) {
+		return nil, fmt.Errorf("%s in %s isn't an object, so line-lx won't change it", key, path)
+	}
+	return out, nil
+}
+
+// settingsMarket is an extraKnownMarketplaces entry.
+type settingsMarket struct {
+	Source struct {
+		Source        string `json:"source"`
+		URL           string `json:"url,omitempty"`
+		Path          string `json:"path,omitempty"`
+		HeadersHelper string `json:"headersHelper,omitempty"`
+	} `json:"source"`
+	AutoUpdate bool `json:"autoUpdate,omitempty"`
+}
+
+func (m settingsMarket) entry() claudeMarketplaceEntry {
+	return claudeMarketplaceEntry{Source: m.Source.Source, Path: m.Source.Path, URL: m.Source.URL}
+}
+
+// connectSettings declares the hub's marketplace in settings, under its name, and enables its plugins.
+// Entries for this hub under another name (the workspace's former slug) or for line-lx's former folder go,
+// with the plugins enabled from them. It refuses another marketplace under the hub's name.
+func connectSettings(s map[string]json.RawMessage, path string, cat *hubCatalog, hub, oldDir, helper string) error {
+	markets, err := settingsObject(s, "extraKnownMarketplaces", path)
+	if err != nil {
+		return err
+	}
+	enabled, err := settingsObject(s, "enabledPlugins", path)
+	if err != nil {
+		return err
+	}
+	for name, raw := range markets {
+		var m settingsMarket
+		_ = json.Unmarshal(raw, &m)
+		ours := m.entry().ours(hub, oldDir)
+		switch {
+		case name == cat.name && !ours:
+			from := m.Source.URL + m.Source.Path
+			if from == "" {
+				from = m.Source.Source
+			}
+			return errMarketplaceClash{cat.name, from}
+		case name != cat.name && ours:
+			delete(markets, name)
+			for id := range enabled {
+				if strings.HasSuffix(id, "@"+name) {
+					delete(enabled, id)
+				}
+			}
+		}
+	}
+	var m settingsMarket
+	m.Source.Source, m.Source.URL, m.Source.HeadersHelper, m.AutoUpdate = "url", marketplaceURL(hub), helper, true
+	markets[cat.name] = rawJSON(m)
+
+	// Each plugin of the catalog, enabled: Claude Code downloads an enabled plugin it lacks when it starts,
+	// which it doesn't do for the bundle's dependencies. A plugin the person turned off stays off. One the
+	// hub no longer has goes, unless the person turned it off, or the catalog is empty (a hub that lists
+	// nothing isn't a reason to drop everything). The bundle brings the plugins published later, when
+	// Claude Code auto-updates.
+	enabled[bundlePlugin+"@"+cat.name] = json.RawMessage("true")
+	for id, v := range enabled {
+		plugin, ok := strings.CutSuffix(id, "@"+cat.name)
+		if ok && len(cat.plugins) > 0 && string(v) == "true" && plugin != bundlePlugin && !slices.Contains(cat.plugins, plugin) {
+			delete(enabled, id)
+		}
+	}
+	for _, plugin := range cat.plugins {
+		if _, set := enabled[plugin+"@"+cat.name]; !set {
+			enabled[plugin+"@"+cat.name] = json.RawMessage("true")
+		}
+	}
+	s["extraKnownMarketplaces"], s["enabledPlugins"] = rawJSON(markets), rawJSON(enabled)
+	return nil
+}
+
+// rawJSON encodes v without HTML escaping, so the other settings keep their characters as written: a
+// hook's `&&` stays `&&`, not `&&`.
+func rawJSON(v any) json.RawMessage {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+	return bytes.TrimSpace(b.Bytes())
+}
+
+// claudeManagedDir is where Claude Code reads its managed settings files on this OS
+// (https://code.claude.com/docs/en/managed-settings). line-lx can't see MDM profiles or server-managed settings.
+var claudeManagedDir = map[string]string{"darwin": "/Library/Application Support/ClaudeCode", "linux": "/etc/claude-code"}[runtime.GOOS]
+
+// claudeSettingsFiles are the files whose settings can connect Claude Code to the hub, the one that wins
+// first: the managed drop-ins (the last in alphabetical order wins), managed-settings.json, then the
+// person's settings.
+func claudeSettingsFiles() []string {
+	var files []string
+	if claudeManagedDir != "" {
+		dropIns, _ := filepath.Glob(filepath.Join(claudeManagedDir, "managed-settings.d", "*.json"))
+		slices.Reverse(dropIns)
+		for _, f := range dropIns {
+			if !strings.HasPrefix(filepath.Base(f), ".") { // Claude Code ignores hidden files
+				files = append(files, f)
+			}
+		}
+		files = append(files, filepath.Join(claudeManagedDir, "managed-settings.json"))
+	}
+	if user, err := claudeSettingsPath(); err == nil {
+		files = append(files, user)
+	}
+	return files
+}
+
+// claudeConnection reads how Claude Code's settings, managed or the person's, connect it to the hub: the
+// marketplace's name ("" when they don't), the file that declares it, and what's wrong with the
+// connection, if anything. A managed file line-lx can't read is passed over.
+func claudeConnection(hub string) (name, where, problem string, err error) {
+	user, _ := claudeSettingsPath()
+	var market settingsMarket
+	enabled := map[string]json.RawMessage{} // for each plugin, the file that wins
+	for _, path := range claudeSettingsFiles() {
+		s, real, _, err := readSettingsFile(path)
+		var markets, en map[string]json.RawMessage
+		if err == nil {
+			markets, err = settingsObject(s, "extraKnownMarketplaces", real)
+		}
+		if err == nil {
+			en, err = settingsObject(s, "enabledPlugins", real)
+		}
+		switch {
+		case err != nil && path == user:
+			return "", "", "", err
+		case err != nil:
 			continue
 		}
-		if _, err := claude("plugin", "marketplace", "remove", "--", name); err != nil {
-			return nil, err
-		}
-	}
-	// The workspace's slug changed: its marketplace has a new name, so it's added again under that name.
-	if ours != nil && ours.Name != cat.name {
-		if validName(ours.Name) {
-			if _, err := claude("plugin", "marketplace", "remove", "--", ours.Name); err != nil {
-				return nil, err
+		for id, v := range en {
+			if _, ok := enabled[id]; !ok {
+				enabled[id] = v
 			}
 		}
-		ours = nil
-	}
-	if ours == nil {
-		_, err = claude("plugin", "marketplace", "add", "--", dir)
-	} else {
-		_, err = claude("plugin", "marketplace", "update", "--", cat.name)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &claudeMarket{name: cat.name, dir: dir, listed: listed, failed: failed}, nil
-}
-
-// claudeFind looks through Claude Code's marketplaces for the hub's folder (ours), marketplaces added by
-// this hub's URL, which can't authenticate (stale), and another marketplace under the hub's name (a clash).
-func claudeFind(hub, dir, name string) (ours *claudeMarketplaceEntry, stale []string, err error) {
-	list, err := claudeMarketplaces()
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, m := range list {
-		switch {
-		case m.isFolder(dir):
-			ours = &m
-		case m.Source == "url" && strings.TrimRight(m.URL, "/") == marketplaceURL(hub):
-			stale = append(stale, m.Name)
-		case m.Name == name:
-			from := m.Path + m.URL
-			if from == "" {
-				from = m.Source
+		for _, key := range sortedKeys(markets) {
+			var m settingsMarket
+			if name == "" && json.Unmarshal(markets[key], &m) == nil && m.Source.Source == "url" &&
+				strings.TrimRight(m.Source.URL, "/") == marketplaceURL(hub) {
+				name, where, market = key, path, m
 			}
-			return nil, nil, errMarketplaceClash{name, from}
 		}
 	}
-	return ours, stale, nil
+	if name == "" {
+		return "", "", "", nil
+	}
+	bin, isHelper := strings.CutSuffix(market.Source.HeadersHelper, " auth-header")
+	if unquoted, ok := strings.CutPrefix(bin, "'"); ok {
+		bin = strings.TrimSuffix(unquoted, "'")
+	}
+	_, runErr := exec.LookPath(bin)
+	switch {
+	case !isHelper:
+		problem = "its marketplace doesn't sign in with `line-lx auth-header`"
+	case runErr != nil:
+		problem = fmt.Sprintf("its marketplace runs %s, which isn't an executable file", clean(bin))
+	case !market.AutoUpdate:
+		problem = "its marketplace doesn't auto-update"
+	case string(enabled[bundlePlugin+"@"+name]) != "true":
+		problem = bundlePlugin + "@" + name + " isn't enabled"
+	}
+	return name, where, problem, nil
 }
 
-// claudeBlocked says why sync would skip Claude Code: the hub has no marketplace, or another marketplace
-// has its name. Nil when sync can go ahead.
+// claudeBlocked says why sync would skip Claude Code, or can't connect it, from the hub's marketplace and
+// Claude Code's settings, without changing anything. Nil when sync can go ahead.
 func claudeBlocked(api *hubClient) error {
 	cat, err := hubMarketplace(api)
 	if err != nil {
 		return err
 	}
-	dir, err := claudeDir(api.hub)
+	oldDir, err := claudeDir(api.hub)
 	if err != nil {
 		return err
 	}
-	_, _, err = claudeFind(api.hub, dir, cat.name)
-	return err
-}
-
-// marketStamp records the archive each plugin folder was extracted from, so an unchanged plugin isn't
-// downloaded again.
-type marketStamp struct {
-	Hub     string            `json:"hub"`
-	Plugins map[string]string `json:"plugins"` // name → sha256
-}
-
-// writeMarketplace writes the hub's catalog to dir. Each plugin is extracted to a staging folder, then
-// renamed into place, so Claude Code never reads half a plugin; marketplace.json goes last, through a
-// rename too, and lists only the plugins that have a folder.
-func writeMarketplace(api *hubClient, cat *hubCatalog, dir string) (listed map[string]bool, failed map[string]error, err error) {
-	base, plugins := filepath.Dir(dir), filepath.Join(dir, "plugins")
-	staging := filepath.Join(base, ".staging")
-	for _, p := range []string{base, dir, plugins, filepath.Join(dir, ".claude-plugin"), staging} {
-		if err := realDir(p); err != nil {
-			return nil, nil, err
-		}
-	}
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		return nil, nil, err
-	}
-	if err := os.MkdirAll(plugins, 0o755); err != nil {
-		return nil, nil, err
-	}
-	if err := os.RemoveAll(staging); err != nil { // leftovers of an interrupted sync
-		return nil, nil, err
-	}
-	if err := os.Mkdir(staging, 0o700); err != nil {
-		return nil, nil, err
-	}
-	defer os.RemoveAll(staging)
-
-	stampPath := filepath.Join(dir, ".line-lx.json")
-	var old marketStamp
-	if data, err := os.ReadFile(stampPath); err == nil {
-		_ = json.Unmarshal(data, &old)
-	}
-	st := marketStamp{Hub: api.hub, Plugins: map[string]string{}}
-	listed, failed = map[string]bool{}, map[string]error{}
-	var entries []map[string]json.RawMessage
-	for _, p := range cat.plugins {
-		dest := filepath.Join(plugins, p.name)
-		sha := old.Plugins[p.name]
-		switch {
-		case p.err != nil:
-			failed[p.name] = p.err
-		case sha == p.sha256 && old.Hub == api.hub && isDir(dest):
-		default:
-			if err := fetchPlugin(api, p, filepath.Join(staging, p.name), dest); err != nil {
-				failed[p.name] = err
-			} else {
-				sha = p.sha256
-			}
-		}
-		if !isDir(dest) {
-			continue
-		}
-		st.Plugins[p.name] = sha
-		listed[p.name] = true
-		source, _ := json.Marshal("./plugins/" + p.name)
-		entry := map[string]json.RawMessage{}
-		for k, v := range p.entry {
-			entry[k] = v
-		}
-		entry["source"] = source
-		entries = append(entries, entry)
-	}
-	if err := writeJSON(stampPath, st); err != nil {
-		return nil, nil, err
-	}
-	doc := map[string]json.RawMessage{}
-	for k, v := range cat.doc {
-		doc[k] = v
-	}
-	if entries == nil {
-		entries = []map[string]json.RawMessage{}
-	}
-	doc["plugins"], _ = json.Marshal(entries)
-	return listed, failed, writeJSON(filepath.Join(dir, ".claude-plugin", "marketplace.json"), doc)
-}
-
-// fetchPlugin downloads a plugin's archive, checks it against the marketplace's sha256, extracts it to
-// tmp and moves it to dest.
-func fetchPlugin(api *hubClient, p catalogPlugin, tmp, dest string) error {
-	data, err := api.download(p.url, maxArchive)
+	s, path, _, err := readClaudeSettings()
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != p.sha256 {
-		return fmt.Errorf("the archive of %s doesn't match the sha256 in the hub's marketplace", p.name)
-	}
-	if err := extractPlugin(data, tmp, p.name); err != nil {
-		return fmt.Errorf("the archive of %s: %v", p.name, err)
-	}
-	return replaceDir(tmp, dest)
+	// A dry run on a copy: the helper doesn't matter for these checks, so it's left empty.
+	return connectSettings(s, path, cat, api.hub, oldDir, "")
 }
 
-// extractPlugin unzips a plugin archive into dest, a folder it creates. It takes only plain files and
-// folders at local paths, each once, within the size limits, and needs .claude-plugin/plugin.json to
-// name the plugin it is for. Every write goes through an os.Root on dest, so nothing lands outside it.
-func extractPlugin(data []byte, dest, plugin string) error {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+// claudeConnect connects Claude Code to the hub, and says what it did in one sentence. Running it again
+// changes nothing, but installs the plugins Claude Code still lacks.
+func claudeConnect(api *hubClient) (string, error) {
+	cat, err := hubMarketplace(api)
 	if err != nil {
-		return fmt.Errorf("not a zip archive: %v", err)
+		return "", err
 	}
-	if len(zr.File) > maxArchiveEntries {
-		return fmt.Errorf("over %d entries", maxArchiveEntries)
+	for _, name := range cat.refused {
+		fmt.Printf("%-12s skipped the plugin %q: line-lx refuses its name\n", claudeTarget, name)
 	}
-	if err := os.Mkdir(dest, 0o755); err != nil {
-		return err
-	}
-	root, err := os.OpenRoot(dest)
+	oldDir, err := claudeDir(api.hub)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer root.Close()
+	helper, err := helperCommand()
+	if err != nil {
+		return "", err
+	}
+	// Refuse before changing anything: settings line-lx can't change, or another marketplace under the name.
+	s, path, _, err := readClaudeSettings()
+	if err == nil {
+		err = connectSettings(s, path, cat, api.hub, oldDir, helper)
+	}
+	if err != nil {
+		return "", err
+	}
 
-	seen := map[string]bool{}
-	var total int64
-	for _, f := range zr.File {
-		name := strings.TrimSuffix(f.Name, "/")
-		folder := name != f.Name
-		if !localPath(name) {
-			return fmt.Errorf("unsafe path %q", clean(f.Name))
-		}
-		// Case-insensitive: on macOS two such names are one file.
-		key := strings.ToLower(name)
-		if seen[key] {
-			return fmt.Errorf("%q is in it twice", clean(name))
-		}
-		seen[key] = true
-		mode := f.Mode()
-		switch {
-		case folder && mode.IsDir():
-			if err := root.MkdirAll(filepath.FromSlash(name), 0o755); err != nil {
-				return err
-			}
-			continue
-		case folder || !mode.IsRegular():
-			return fmt.Errorf("%q isn't a plain file or folder", clean(f.Name))
-		}
-		if parent := path.Dir(name); parent != "." {
-			if err := root.MkdirAll(filepath.FromSlash(parent), 0o755); err != nil {
-				return err
-			}
-		}
-		n, err := extractFile(root, f, filepath.FromSlash(name))
+	known, onPath := false, claudeOnPath()
+	var stale []string
+	if onPath {
+		list, err := claudeMarketplaces()
 		if err != nil {
-			return err
+			return "", err
 		}
-		if total += n; total > maxArchiveTotal {
-			return fmt.Errorf("over %d MiB uncompressed", maxArchiveTotal>>20)
+		for _, m := range list {
+			switch {
+			case m.Name == cat.name && m.Source == "url" && strings.TrimRight(m.URL, "/") == marketplaceURL(api.hub):
+				known = true
+			case m.ours(api.hub, oldDir): // line-lx's former folder, or the workspace's former name
+				stale = append(stale, m.Name)
+			case m.Name == cat.name:
+				return "", errMarketplaceClash{cat.name, m.Path + m.URL}
+			}
 		}
-	}
-
-	manifest, err := root.ReadFile(filepath.Join(".claude-plugin", "plugin.json"))
-	if err != nil {
-		return errors.New("no .claude-plugin/plugin.json")
-	}
-	var m struct{ Name string }
-	if err := json.Unmarshal(manifest, &m); err != nil || m.Name != plugin {
-		return fmt.Errorf(".claude-plugin/plugin.json isn't for %s", plugin)
-	}
-	return nil
-}
-
-// extractFile writes one archive entry, which must not exist yet: O_EXCL also refuses two names the
-// filesystem takes as one (case, Unicode normalization). It returns the size written.
-func extractFile(root *os.Root, f *zip.File, name string) (int64, error) {
-	in, err := f.Open()
-	if err != nil {
-		return 0, err
-	}
-	defer in.Close()
-	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	n, err := io.Copy(out, io.LimitReader(in, maxArchiveEntry+1))
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil && n > maxArchiveEntry {
-		err = fmt.Errorf("%q is over %d MiB", clean(f.Name), maxArchiveEntry>>20)
-	}
-	return n, err
-}
-
-// prune removes the plugin folders not in keep: plugins the hub no longer has, once uninstalled.
-func (m *claudeMarket) prune(keep map[string]bool) error {
-	entries, err := os.ReadDir(filepath.Join(m.dir, "plugins"))
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if !keep[e.Name()] {
-			if err := os.RemoveAll(filepath.Join(m.dir, "plugins", e.Name())); err != nil {
-				return err
+		// Removing a marketplace uninstalls its plugins: Claude Code installs them again from the hub.
+		for _, name := range stale {
+			if !validName(name) {
+				return "", fmt.Errorf("Claude Code has the hub's marketplace under an invalid name %q", clean(name))
+			}
+			if _, err := claude("plugin", "marketplace", "remove", "--", name); err != nil {
+				return "", err
 			}
 		}
 	}
-	return nil
+
+	// Read again: removing a marketplace changes the settings.
+	s, path, mode, err := readClaudeSettings()
+	if err != nil {
+		return "", err
+	}
+	before, _ := json.Marshal(s)
+	var old settingsMarket
+	if markets, err := settingsObject(s, "extraKnownMarketplaces", path); err == nil {
+		_ = json.Unmarshal(markets[cat.name], &old)
+	}
+	if err := connectSettings(s, path, cat, api.hub, oldDir, helper); err != nil {
+		return "", err
+	}
+	after, _ := json.Marshal(s)
+	changed := !bytes.Equal(before, after)
+	if changed {
+		if err := writeClaudeSettings(s, path, mode); err != nil {
+			return "", err
+		}
+	}
+	// Claude Code fetches the marketplace again from a source its settings changed, when it starts; until
+	// then, its CLI doesn't list it. So line-lx installs now only from a marketplace whose source it kept.
+	now := known && old.Source.Source == "url" && old.Source.URL == marketplaceURL(api.hub) && old.Source.HeadersHelper == helper
+	// Each enabled plugin Claude Code hasn't installed. Not the bundle: installing it could bring a plugin
+	// the person turned off; the next start fetches it. A plugin line-lx can't install now comes at the next
+	// start too, so a failure here isn't one of the connection.
+	var pending []string
+	var installErr error
+	installedSome := false
+	var installed map[string]string
+	if now {
+		installed, err = claudeInstalled(cat.name) // unreadable: the next start brings them
+	}
+	if now && err == nil {
+		enabled, _ := settingsObject(s, "enabledPlugins", path)
+		deadline := time.Now().Add(claudeInstallWait)
+		for _, plugin := range cat.plugins {
+			if _, has := installed[plugin]; has || string(enabled[plugin+"@"+cat.name]) != "true" {
+				continue
+			}
+			err := fmt.Errorf("line-lx stopped installing after %s", durationText(claudeInstallWait))
+			if time.Now().Before(deadline) {
+				_, err = claude("plugin", "install", "--", plugin+"@"+cat.name)
+			}
+			switch {
+			case err == nil:
+				installedSome = true
+			case installErr == nil:
+				installErr = err
+				fallthrough
+			default:
+				pending = append(pending, plugin)
+			}
+		}
+	}
+	// line-lx's former folder, once Claude Code no longer reads plugins from it.
+	if onPath {
+		if err := os.RemoveAll(oldDir); err != nil {
+			return "", err
+		}
+		_ = os.Remove(filepath.Dir(oldDir)) // only when no other hub's folder is left
+	}
+
+	gets := fmt.Sprintf("Claude Code gets %s's plugins from the hub", cat.owner)
+	if !now {
+		// Claude Code doesn't know the marketplace (yet): it fetches it when it starts.
+		msg := "connected: " + gets + " from its next start."
+		if len(stale) > 0 || old.Source.Source == "directory" {
+			msg += " The plugins line-lx installed before come back when Claude Code starts again."
+		}
+		return msg, nil
+	}
+	msg := "connected: " + gets + " by itself."
+	if !changed {
+		msg = "already " + msg
+	}
+	if changed || installedSome {
+		msg += " Next: run /reload-plugins in Claude Code, or restart it."
+	}
+	if len(pending) > 0 {
+		msg += fmt.Sprintf(" It installs %s at its next start instead (%v).", strings.Join(pending, ", "), installErr)
+	}
+	return msg, nil
 }
 
 func isDir(path string) bool {
-	info, err := os.Lstat(path)
+	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }

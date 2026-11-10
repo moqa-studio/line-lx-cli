@@ -11,14 +11,14 @@ import (
 
 const claudeTarget = "claude-code"
 
-var errNoAgent = errors.New("No agent found on this machine (looked for ~/.codex, ~/.pi/agent and `claude` on PATH).")
+var errNoAgent = errors.New("No agent found on this machine (looked for ~/.codex, ~/.pi/agent, and ~/.claude or `claude` on PATH).")
 
 // agentResult is what a sync did for one agent, for `line-lx setup`'s summary.
 type agentResult struct {
 	name, where                string
 	delivered, current, failed int
 	removed                    int    // plugins line-lx took out of the agent
-	synced                     int    // Claude Code: plugins it already has from the person's claude.ai account
+	connected                  string // Claude Code: what connecting it did
 	skipped                    string // why the agent got nothing, when sync skipped it
 }
 
@@ -31,8 +31,9 @@ func runSync() error {
 	return err
 }
 
-// syncAll writes the hub's plugins to every agent found here and reports each delivery to the hub. It
-// returns errNoAgent when there's none, and errSilent when a target failed (the details are printed).
+// syncAll writes the hub's plugins to every agent found here and reports each delivery to the hub, and
+// connects Claude Code to the hub, which then gets the plugins by itself. It returns errNoAgent when
+// there's no agent, and errSilent when a target failed (the details are printed).
 func syncAll(api *hubClient) ([]*agentResult, error) {
 	unlock, err := syncLock()
 	if err != nil {
@@ -61,7 +62,7 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 	home, _ := os.UserHomeDir()
 
 	var results []*agentResult
-	var written, installed, upToDate, synced, failed, reported int
+	var written, upToDate, failed, reported int
 	var reportErr error
 	// deliver prints the outcome of one plugin × target and reports it to the hub.
 	deliver := func(res *agentResult, r release, unsupported []string, werr error) {
@@ -77,10 +78,6 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 			status, msg = "failed", "failed: "+werr.Error()
 			failed++
 			res.failed++
-		case target == claudeTarget: // Claude Code installs; it never reports skipped files
-			msg = "installed"
-			installed++
-			res.delivered++
 		case len(unsupported) > 0:
 			status, msg = "partial", "written, skipped: "+strings.Join(unsupported, "; ")
 			written++
@@ -146,94 +143,23 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 		_ = t.sweepStaging() // nothing left behind once this target is done
 	}
 
-	if _, ok := claudeDetected(); ok {
+	// Claude Code: line-lx writes no plugin, it connects Claude Code to the hub. Nothing is reported to the
+	// hub: Claude Code fetches the plugins itself.
+	if claudeDetected() {
 		res := &agentResult{name: claudeTarget}
 		results = append(results, res)
-		market, err := claudePrepare(api)
-		var have, fromAccount map[string]string
-		if err == nil {
-			res.where = market.name
-			have, fromAccount, err = claudeInstalled(market.name)
-		}
-		var clash errMarketplaceClash
+		msg, err := claudeConnect(api)
 		switch {
-		case errors.Is(err, errNoMarketplace), errors.As(err, &clash):
-			// Nothing line-lx can install: one line, nothing reported.
+		case claudeSkipped(err):
 			res.skipped = err.Error()
-			fmt.Printf("%s skipped: %v.\n", claudeTarget, err)
+			fmt.Printf("%-12s skipped: %v.\n", claudeTarget, err)
 		case err != nil:
-			if len(rels) == 0 { // no plugin to report it with, but it still shows and fails the sync
-				line("", claudeTarget, "failed: "+err.Error())
-				failed++
-				res.failed++
-			}
-			for _, r := range rels {
-				deliver(res, r, nil, err)
-			}
+			fmt.Printf("%-12s failed: %v\n", claudeTarget, err)
+			failed++
+			res.failed++
 		default:
-			for _, r := range rels {
-				v, ok := have[r.name]
-				id := r.name + "@" + market.name
-				_, isSynced := fromAccount[r.name]
-				switch {
-				case !validName(r.name):
-					deliver(res, r, nil, fmt.Errorf("invalid plugin name %q", clean(r.name)))
-				case isSynced:
-					// The Claude connector already puts it in Claude Code, through the person's claude.ai
-					// account. A second copy from line-lx would load each skill twice, so line-lx installs none,
-					// and removes the one it installed before. Nothing is reported: a claude-code delivery
-					// says line-lx installed this version on this machine, which it didn't. The hub already
-					// has the claude delivery for it, and Claude Code follows that one.
-					msg := "already in Claude Code through your claude.ai account"
-					if ok {
-						if _, err := claude("plugin", "uninstall", "--", id); err != nil {
-							msg = "already in Claude Code through your claude.ai account, but line-lx's copy stays: " + err.Error()
-							failed++
-							res.failed++
-						} else {
-							msg += ": removed line-lx's copy"
-							res.removed++
-						}
-					}
-					line(label(r.name, r.version.Version), claudeTarget, msg)
-					synced++
-					res.synced++
-				case market.failed[r.name] != nil:
-					deliver(res, r, nil, market.failed[r.name])
-				case !market.listed[r.name]:
-					deliver(res, r, nil, errors.New("not in the hub's Claude Code marketplace"))
-				case ok && v == r.version.Version:
-					current(res, r)
-				case ok:
-					_, cerr := claude("plugin", "update", "--", id)
-					deliver(res, r, nil, cerr)
-				default:
-					_, cerr := claude("plugin", "install", "--", id)
-					deliver(res, r, nil, cerr)
-				}
-			}
-			// Plugins this hub no longer has, from its marketplace only. A plugin still installed keeps
-			// its folder, which Claude Code reads it from.
-			keep := market.listed
-			for _, name := range sortedKeys(have) {
-				if inHub[name] {
-					continue
-				}
-				if _, err := claude("plugin", "uninstall", "--", name+"@"+market.name); err != nil {
-					line(label(name, have[name]), claudeTarget, "failed to remove: "+err.Error())
-					failed++
-					res.failed++
-					keep[name] = true
-				} else {
-					line(label(name, have[name]), claudeTarget, "removed (not in the hub anymore)")
-					res.removed++
-				}
-			}
-			if err := market.prune(keep); err != nil {
-				line("", claudeTarget, "failed to clean up "+market.dir+": "+err.Error())
-				failed++
-				res.failed++
-			}
+			res.connected = msg
+			fmt.Printf("%-12s %s\n", claudeTarget, msg)
 		}
 	}
 
@@ -241,11 +167,7 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 		return nil, errNoAgent
 	}
 
-	summary := fmt.Sprintf("%d written, %d installed, %d up to date, ", written, installed, upToDate)
-	if synced > 0 {
-		summary += fmt.Sprintf("%d already in Claude Code through claude.ai, ", synced)
-	}
-	summary += fmt.Sprintf("%d failed.", failed)
+	summary := fmt.Sprintf("%d written, %d up to date, %d failed.", written, upToDate, failed)
 	switch {
 	case reportErr != nil:
 		summary += " Couldn't report every delivery to the hub: " + reportErr.Error()
@@ -262,22 +184,13 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 // installedPlugin is what a target has for one plugin; versionID is empty for Claude Code.
 type installedPlugin struct {
 	version, versionID, hub string
-	synced, twice           bool // Claude Code: it comes from the person's claude.ai account, and from line-lx too
 }
 
-const (
-	stateCurrent = "up to date"
-	stateSynced  = "through your claude.ai account (@synced)"
-)
+const stateCurrent = "up to date"
 
 // hubState compares an installed plugin with the hub's latest. rels is nil when the hub didn't answer.
 func hubState(hub string, rels map[string]release, name string, p installedPlugin) string {
-	switch {
-	case p.twice:
-		return stateSynced + " and from line-lx: run `line-lx sync`"
-	case p.synced:
-		return stateSynced
-	case p.hub != hub:
+	if p.hub != hub {
 		return "from " + p.hub
 	}
 	if rels == nil {
@@ -300,27 +213,6 @@ func fileInstalled(t fileTarget) map[string]installedPlugin {
 		out[name] = installedPlugin{version: s.Version, versionID: s.VersionID, hub: s.Hub}
 	}
 	return out
-}
-
-// claudeInstalledPlugins lists what Claude Code has from this hub's marketplace (empty when not added),
-// and the hub's plugins (in rels) it has synced from the person's claude.ai account.
-func claudeInstalledPlugins(hub string, rels map[string]release) (map[string]installedPlugin, string, error) {
-	market, err := claudeMarketplace(hub)
-	if err != nil || market == "" {
-		return nil, market, err
-	}
-	installed, synced, err := claudeInstalled(market)
-	out := map[string]installedPlugin{}
-	for name, v := range installed {
-		out[name] = installedPlugin{version: v, hub: hub}
-	}
-	for name, v := range synced {
-		if _, inHub := rels[name]; inHub {
-			_, twice := installed[name]
-			out[name] = installedPlugin{version: v, hub: hub, synced: true, twice: twice}
-		}
-	}
-	return out, market, err
 }
 
 // hubReleases returns the hub's latest releases by plugin name, for list and doctor.
@@ -367,18 +259,30 @@ func runList() error {
 			show(fmt.Sprintf("%s (%s)", t.name, t.dir), fileInstalled(t))
 		}
 	}
-	if _, ok := claudeDetected(); ok {
+	if claudeDetected() {
 		found = true
-		dir, _ := claudeDir(hub)
-		installed, market, err := claudeInstalledPlugins(hub, rels)
-		title := fmt.Sprintf("%s (%s)", claudeTarget, dir)
-		if market != "" {
-			title = fmt.Sprintf("%s (%s, %s)", claudeTarget, market, dir)
-		}
-		if err != nil {
-			fmt.Printf("%s\n  can't list its plugins: %v\n", title, err)
-		} else {
-			show(title, installed)
+		market, _, _, err := claudeConnection(hub)
+		switch {
+		case err != nil:
+			fmt.Printf("%s\n  can't read its settings: %v\n", claudeTarget, err)
+		case market == "":
+			fmt.Printf("%s\n  not connected to the hub: run `line-lx sync`\n", claudeTarget)
+		case !claudeOnPath():
+			fmt.Printf("%s (%s)\n  connected; line-lx lists its plugins only with `claude` on PATH\n", claudeTarget, market)
+		default:
+			// What Claude Code installed from the hub's marketplace, but the bundle: it's not a plugin of the hub.
+			versions, err := claudeInstalled(market)
+			if err != nil {
+				fmt.Printf("%s (%s)\n  can't list its plugins: %v\n", claudeTarget, market, err)
+				break
+			}
+			installed := map[string]installedPlugin{}
+			for name, v := range versions {
+				if name != bundlePlugin {
+					installed[name] = installedPlugin{version: v, hub: hub}
+				}
+			}
+			show(fmt.Sprintf("%s (%s, installed by Claude Code)", claudeTarget, market), installed)
 		}
 	}
 	if !found {
@@ -438,8 +342,7 @@ func runDoctor() error {
 		}
 		var current, behind int
 		for name := range rels {
-			// A plugin synced from the claude.ai account follows the hub through the Claude connector.
-			if p, has := installed[name]; has && (hubState(hub, rels, name, p) == stateCurrent || p.synced && !p.twice) {
+			if p, has := installed[name]; has && hubState(hub, rels, name, p) == stateCurrent {
 				current++
 			} else {
 				behind++
@@ -465,30 +368,41 @@ func runDoctor() error {
 			fmt.Printf("     %-12s %s\n", "", t.restart)
 		}
 	}
-	if _, detected := claudeDetected(); !detected {
-		fmt.Printf("     %-12s not found (no `claude` on PATH)\n", claudeTarget)
+	if !claudeDetected() {
+		fmt.Printf("     %-12s not found (no ~/.claude, no `claude` on PATH)\n", claudeTarget)
 	} else {
 		found = true
-		dir, _ := claudeDir(hub)
-		installed, market, err := claudeInstalledPlugins(hub, rels)
+		settings, _ := claudeSettingsPath()
+		market, where, problem, err := claudeConnection(hub)
 		if err == nil && market == "" && api != nil {
 			err = claudeBlocked(api) // the same checks as sync: a reason to skip isn't a failure
 		}
-		var clash errMarketplaceClash
-		skipped := errors.Is(err, errNoMarketplace) || errors.As(err, &clash)
 		switch {
-		case skipped:
+		case claudeSkipped(err):
 			check(claudeTarget, true, err.Error())
 		case err != nil:
-			check(claudeTarget, false, dir+" · "+err.Error())
-		case market == "" && len(rels) > 0:
-			check(claudeTarget, false, dir+" · the hub's marketplace isn't added: run `line-lx sync`")
+			check(claudeTarget, false, err.Error())
+		case market == "":
+			check(claudeTarget, false, settings+" · not connected to the hub: run `line-lx sync`")
+		case problem != "" && where != settings:
+			check(claudeTarget, false, where+" · "+problem+": ask who manages Claude Code's managed settings")
+		case problem != "":
+			check(claudeTarget, false, where+" · "+problem+": run `line-lx sync`")
 		default:
-			good, msg := compare(installed)
-			check(claudeTarget, good, dir+" · "+msg)
+			check(claudeTarget, true, where+" · connected: Claude Code gets the hub's plugins as "+bundlePlugin+"@"+market)
 		}
-		if !skipped {
-			fmt.Printf("     %-12s %s\n", "", claudeRestart)
+		// A warning, not a failure: line-lx can't tell the Claude Code of the desktop app or an IDE.
+		if claudeOnPath() {
+			out, err := claude("--version")
+			version, good := claudeVersionOK(string(out))
+			switch {
+			case err != nil:
+				fmt.Printf("warn %-12s can't tell Claude Code's version: %v\n", "", err)
+			case !good:
+				fmt.Printf("warn %-12s Claude Code %s can't sign in to the hub: update it to %s or later\n", "", version, minClaudeVersion)
+			default:
+				fmt.Printf("     %-12s Claude Code %s\n", "", version)
+			}
 		}
 	}
 	if !found {

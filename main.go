@@ -1,8 +1,8 @@
 // Command line-lx puts a company's agent plugins on a developer's machine.
 //
-// It asks the Metro-LX hub what this person should have, fetches it and writes it for each
-// local agent (Codex, pi, Claude Code). It moves files; the hub makes every decision:
-// it never opens a SKILL.md, translates formats or decides permissions.
+// It asks the Metro-LX hub what this person should have, fetches it and writes it for Codex
+// and pi, and connects Claude Code to the hub, which then gets it by itself. It moves files;
+// the hub makes every decision: it never opens a SKILL.md, translates formats or decides permissions.
 //
 // Not built yet: `line-lx add` / `line-lx remove`. The hub has no endpoint for personal
 // choices, so everyone gets all of their org's published plugins.
@@ -62,6 +62,8 @@ func main() {
 			RunE: func(*cobra.Command, []string) error { return runList() }},
 		&cobra.Command{Use: "doctor", Short: "Check the Metro-LX hub, your sign-in and each agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runDoctor() }},
+		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return runAuthHeader() }},
 	)
 
 	if err := root.Execute(); err != nil {

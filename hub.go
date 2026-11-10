@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -173,31 +172,6 @@ func (c *hubClient) send(method, target string, data []byte) (*http.Response, er
 		return nil, &apiError{res.StatusCode, e.Error.Message}
 	}
 	return res, nil
-}
-
-// download fetches a file the hub links to, such as a plugin archive, with the person's token. The link
-// must be on the hub itself (its scheme, host and path prefix), so the token never goes anywhere else.
-// It reads at most max bytes.
-func (c *hubClient) download(link string, max int64) ([]byte, error) {
-	u, err := url.Parse(link)
-	hub, _ := url.Parse(c.hub)
-	if err != nil || u.Scheme != hub.Scheme || !strings.EqualFold(u.Host, hub.Host) || u.User != nil ||
-		!strings.HasPrefix(u.EscapedPath(), hub.EscapedPath()+"/") || slices.Contains(strings.Split(u.Path, "/"), "..") {
-		return nil, fmt.Errorf("the hub links to %q, which isn't on the hub, so line-lx won't download it", clean(link))
-	}
-	res, err := c.send("GET", u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(res.Body, max+1))
-	if err != nil {
-		return nil, fmt.Errorf("can't download %s: %v", clean(link), err)
-	}
-	if int64(len(data)) > max {
-		return nil, fmt.Errorf("%s is over %d MiB", clean(link), max>>20)
-	}
-	return data, nil
 }
 
 // releases returns each plugin's newest version; plugins never published are skipped.

@@ -342,3 +342,63 @@ func TestKeychainErrorIsNotAMissingKeychain(t *testing.T) {
 		t.Error("a keychain that fails sent the sign-in to a file")
 	}
 }
+
+func TestAuthHeaderStaysOnItsHub(t *testing.T) {
+	const hub = "https://hub.example.com/hub"
+	t.Setenv("LINE_LX_HUB", hub)
+	t.Setenv("LINE_LX_TOKEN", "tok")
+	t.Setenv("CLAUDE_CODE_MARKETPLACE_URL", "")
+	t.Setenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL", "")
+	run := func() (string, error) {
+		var err error
+		out := captureStdout(t, func() { err = runAuthHeader() })
+		return out, err
+	}
+
+	// Only Claude Code asks: it says for which marketplace or archive.
+	if out, err := run(); err == nil || !strings.Contains(err.Error(), "only for Claude Code") || out != "" {
+		t.Errorf("auth-header outside Claude Code = %q, %v", out, err)
+	}
+	const want = `{"Authorization":"Bearer tok"}` + "\n"
+	archive := "https://HUB.example.com/hub/api/connectors/claude-code/plugins/basics.zip"
+	for _, env := range [][2]string{{marketplaceURL(hub), ""}, {"", archive}, {marketplaceURL(hub), archive}} {
+		t.Setenv("CLAUDE_CODE_MARKETPLACE_URL", env[0])
+		t.Setenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL", env[1])
+		if out, err := run(); err != nil || out != want {
+			t.Errorf("auth-header for %v = %q, %v", env, out, err)
+		}
+	}
+
+	// Every URL Claude Code names must be on the hub: never another origin, nor outside the hub's path.
+	for _, v := range []string{"CLAUDE_CODE_MARKETPLACE_URL", "CLAUDE_CODE_PLUGIN_ARCHIVE_URL"} {
+		for _, link := range []string{
+			"https://evil.example.com/hub/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com.evil.example.com/hub/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com:8443/hub/api/connectors/claude-code/marketplace.json",
+			"http://hub.example.com/hub/api/connectors/claude-code/marketplace.json",
+			"https://user@hub.example.com/hub/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com/other/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com/hubby/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com/hub/../other/marketplace.json",
+			"https://hub.example.com/hub",
+			"::not a url",
+		} {
+			t.Run(v, func(t *testing.T) {
+				t.Setenv(v, link)
+				if out, err := run(); err == nil || out != "" {
+					t.Errorf("%s=%q: printed %q, %v", v, link, out, err)
+				}
+			})
+		}
+	}
+
+	// Not signed in: an error, and nothing on stdout.
+	keyring.MockInit()
+	t.Setenv("CLAUDE_CODE_MARKETPLACE_URL", marketplaceURL(hub))
+	t.Setenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL", "")
+	t.Setenv("LINE_LX_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	if out, err := run(); !errors.As(err, new(errNotSignedIn)) || out != "" {
+		t.Errorf("auth-header without a sign-in = %q, %v", out, err)
+	}
+}
