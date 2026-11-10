@@ -180,6 +180,45 @@ func bearer(hub string) (string, error) {
 	return keychainToken(hub)
 }
 
+// authHeaderWait is how long auth-header waits for the hub: under the 10 s Claude Code gives it.
+const authHeaderWait = 9 * time.Second
+
+// runAuthHeader is what Claude Code runs to sign in to the hub: the headersHelper of the hub's marketplace.
+// It prints the person's token as one JSON object of HTTP headers and nothing else on stdout. Claude Code
+// waits at most 10 s for it, and reuses its output for 60 s, which a token refreshed in its last minute covers.
+func runAuthHeader() error {
+	hub, err := currentHub()
+	if err != nil {
+		return err
+	}
+	// Claude Code says which marketplace or archive it asks headers for: the token only goes to its own hub.
+	for _, v := range []string{"CLAUDE_CODE_MARKETPLACE_URL", "CLAUDE_CODE_PLUGIN_ARCHIVE_URL"} {
+		if raw := os.Getenv(v); raw != "" && !sameOrigin(raw, hub) {
+			return fmt.Errorf("%s isn't on %s, so line-lx won't give it your sign-in.", clean(raw), hub)
+		}
+	}
+	// A refresh can take longer than Claude Code waits: line-lx stops first, and says why.
+	stop := time.AfterFunc(authHeaderWait, func() {
+		fmt.Fprintf(os.Stderr, "The hub at %s didn't answer within %s, so line-lx stopped.\n", hub, authHeaderWait)
+		os.Exit(1)
+	})
+	defer stop.Stop()
+	token, err := bearer(hub)
+	if err != nil {
+		return err
+	}
+	data, _ := json.Marshal(map[string]string{"Authorization": "Bearer " + token})
+	fmt.Println(string(data))
+	return nil
+}
+
+// sameOrigin is true when raw has the hub's scheme, host and port.
+func sameOrigin(raw, hub string) bool {
+	u, err := url.Parse(raw)
+	h, _ := url.Parse(hub)
+	return err == nil && u.User == nil && u.Scheme == h.Scheme && strings.EqualFold(u.Host, h.Host)
+}
+
 // --- OAuth (the hub is the provider) ---
 
 type oauthConfig struct {

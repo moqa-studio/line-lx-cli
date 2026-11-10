@@ -62,6 +62,8 @@ func main() {
 			RunE: func(*cobra.Command, []string) error { return runList() }},
 		&cobra.Command{Use: "doctor", Short: "Check the Metro-LX hub, your sign-in and each agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runDoctor() }},
+		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return runAuthHeader() }},
 	)
 
 	if err := root.Execute(); err != nil {

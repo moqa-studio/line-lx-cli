@@ -342,3 +342,53 @@ func TestKeychainErrorIsNotAMissingKeychain(t *testing.T) {
 		t.Error("a keychain that fails sent the sign-in to a file")
 	}
 }
+
+func TestAuthHeaderStaysOnItsHub(t *testing.T) {
+	const hub = "https://hub.example.com"
+	t.Setenv("LINE_LX_HUB", hub)
+	t.Setenv("LINE_LX_TOKEN", "tok")
+	run := func() (string, error) {
+		var err error
+		out := captureStdout(t, func() { err = runAuthHeader() })
+		return out, err
+	}
+
+	const want = `{"Authorization":"Bearer tok"}` + "\n"
+	if out, err := run(); err != nil || out != want {
+		t.Errorf("auth-header = %q, %v", out, err)
+	}
+	t.Setenv("CLAUDE_CODE_MARKETPLACE_URL", marketplaceURL(hub))
+	t.Setenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL", "https://HUB.example.com/api/connectors/claude-code/plugins/basics.zip")
+	if out, err := run(); err != nil || out != want {
+		t.Errorf("auth-header for the hub's marketplace = %q, %v", out, err)
+	}
+
+	// Claude Code names what it asks headers for: the token never goes to another origin.
+	for _, v := range []string{"CLAUDE_CODE_MARKETPLACE_URL", "CLAUDE_CODE_PLUGIN_ARCHIVE_URL"} {
+		for _, link := range []string{
+			"https://evil.example.com/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com.evil.example.com/api/connectors/claude-code/marketplace.json",
+			"https://hub.example.com:8443/api/connectors/claude-code/marketplace.json",
+			"http://hub.example.com/api/connectors/claude-code/marketplace.json",
+			"https://user@hub.example.com/api/connectors/claude-code/marketplace.json",
+			"::not a url",
+		} {
+			t.Run(v, func(t *testing.T) {
+				t.Setenv(v, link)
+				if out, err := run(); err == nil || out != "" {
+					t.Errorf("%s=%q: printed %q, %v", v, link, out, err)
+				}
+			})
+		}
+	}
+
+	// Not signed in: an error, and nothing on stdout.
+	keyring.MockInit()
+	t.Setenv("CLAUDE_CODE_MARKETPLACE_URL", "")
+	t.Setenv("CLAUDE_CODE_PLUGIN_ARCHIVE_URL", "")
+	t.Setenv("LINE_LX_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	if out, err := run(); !errors.As(err, new(errNotSignedIn)) || out != "" {
+		t.Errorf("auth-header without a sign-in = %q, %v", out, err)
+	}
+}
