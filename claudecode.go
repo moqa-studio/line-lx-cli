@@ -27,7 +27,7 @@ import (
 // whose headersHelper is `line-lx auth-header`, so Claude Code sends the person's token with each fetch, and
 // turns on its auto-update. It enables each plugin of the marketplace, and the hub's bundle plugin,
 // metro-lx, which depends on every plugin of the workspace: Claude Code installs, updates and removes them
-// by itself (Claude Code 2.1.238 or later), and gets a plugin published later through the bundle.
+// by itself, and gets a plugin published later through the bundle (Claude Code 2.1.319 or later).
 //
 // Claude Code fetches a marketplace its settings declare when it starts, and downloads the enabled plugins
 // it lacks, but not the bundle's dependencies. `claude plugin marketplace add` refuses a marketplace whose
@@ -38,8 +38,9 @@ import (
 // bundlePlugin is the hub's plugin that depends on all the others.
 const bundlePlugin = "metro-lx"
 
-// minClaudeVersion is the first Claude Code that runs a marketplace's headersHelper.
-const minClaudeVersion = "2.1.238"
+// minClaudeVersion is the first Claude Code whose auto-update installs a plugin newly added to the bundle's
+// dependencies (2.1.292 doesn't): an older one never gets a plugin published after setup by itself.
+const minClaudeVersion = "2.1.319"
 
 // claudeOnPath is true when the claude CLI is on the PATH.
 func claudeOnPath() bool {
@@ -191,6 +192,25 @@ func claudeVersionOK(out string) (version string, ok bool) {
 	}
 	have, want := parse(version), parse(minClaudeVersion)
 	return clean(version), len(have) == 3 && slices.Compare(have, want) >= 0
+}
+
+// claudeOutdated is the warning for a `claude` on the PATH older than minClaudeVersion, or "" when it is
+// recent enough, absent, or doesn't tell its version (doctor reports that).
+func claudeOutdated() string {
+	if !claudeOnPath() {
+		return ""
+	}
+	out, err := claude("--version")
+	version, ok := claudeVersionOK(string(out))
+	if err != nil || ok || version == "" {
+		return ""
+	}
+	return outdatedText(version)
+}
+
+// outdatedText tells the person to update a Claude Code older than minClaudeVersion.
+func outdatedText(version string) string {
+	return fmt.Sprintf("Claude Code %s is older than %s: update it, or plugins published later won't arrive by themselves", version, minClaudeVersion)
 }
 
 // errNoMarketplace and errNoBundle: the hub doesn't serve what Claude Code needs (yet). Not a failure:

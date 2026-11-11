@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code 2.1.319 or later is needed: an older one doesn't install a plugin published after setup by itself. `setup`, `sync` and `doctor` warn when `claude --version` is older, and say to update it.
+- line-lx sends `User-Agent: line-lx/<version>` with every request to the hub, so the hub can tell line-lx's own reads of the marketplace from Claude Code's.
+
 ### Security
 
 - Built with Go 1.27.4, which fixes GO-2026-6859 in net/http.
