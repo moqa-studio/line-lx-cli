@@ -93,8 +93,8 @@ func newFakeHub(t *testing.T, token string) *fakeHub {
 }
 
 // fakeClaude puts a `claude` on PATH that records its arguments and answers the two list commands
-// with the files markets.json and plugins.json. A call whose arguments are in the file fail fails. It
-// returns the folder holding them.
+// with the files markets.json and plugins.json, and --version with the file version (else 2.1.322). A
+// call whose arguments are in the file fail fails. It returns the folder holding them.
 func fakeClaude(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
@@ -102,7 +102,7 @@ func fakeClaude(t *testing.T) string {
 echo "$*" >> '` + bin + `/argv'
 if [ -f '` + bin + `/fail' ] && [ "$*" = "$(/bin/cat '` + bin + `/fail')" ]; then echo "boom" >&2; exit 1; fi
 case "$*" in
-  "--version") echo "2.1.292 (Claude Code)" ;;
+  "--version") if [ -f '` + bin + `/version' ]; then /bin/cat '` + bin + `/version'; else echo "2.1.322 (Claude Code)"; fi ;;
   "plugin marketplace list --json") /bin/cat '` + bin + `/markets.json' ;;
   "plugin list --json") /bin/cat '` + bin + `/plugins.json' ;;
 esac
@@ -217,8 +217,8 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if info, _ := os.Stat(settings); info.Mode().Perm() != 0o600 {
 		t.Errorf("settings mode = %v, want 0600", info.Mode().Perm())
 	}
-	if argv := read(t, filepath.Join(bin, "argv")); argv != "plugin marketplace list --json\n" {
-		t.Errorf("claude got more than the list:\n%s", argv)
+	if argv := read(t, filepath.Join(bin, "argv")); argv != "plugin marketplace list --json\n--version\n" {
+		t.Errorf("claude got more than the list and its version:\n%s", argv)
 	}
 	want := "claude-code  connected: Claude Code gets Dev's plugins from the hub from its next start.\n"
 	if !strings.Contains(out, want) {
@@ -243,7 +243,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv, "plugin list --json\nplugin install -- notes@metro-dev\n") ||
+	if argv := read(t, filepath.Join(bin, "argv")); !strings.HasSuffix(argv, "plugin list --json\nplugin install -- notes@metro-dev\n--version\n") ||
 		strings.Contains(argv, "basics@") || strings.Contains(argv, "tools@") || strings.Contains(argv, "metro-lx@") {
 		t.Errorf("claude wasn't asked to install the missing plugins only; it got:\n%s", argv)
 	}
@@ -577,14 +577,15 @@ func TestHelperCommand(t *testing.T) {
 
 func TestClaudeVersionOK(t *testing.T) {
 	for out, want := range map[string]bool{
-		"2.1.292 (Claude Code)\n": true,
-		"2.1.238 (Claude Code)":   true,
-		"2.1.300-beta.1":          true,
-		"2.1.238+build.5":         true,
+		"2.1.322 (Claude Code)\n": true,
+		"2.1.319 (Claude Code)":   true,
+		"2.1.320-beta.1":          true,
+		"2.1.319+build.5":         true,
 		"2.2.0":                   true,
 		"3.0.0":                   true,
-		"2.1.237 (Claude Code)":   false,
-		"2.1.237-rc.1":            false,
+		"2.1.318 (Claude Code)":   false,
+		"2.1.292 (Claude Code)":   false,
+		"2.1.318-rc.1":            false,
 		"2.0.999":                 false,
 		"1.9.300":                 false,
 		"2.1":                     false,
@@ -594,6 +595,35 @@ func TestClaudeVersionOK(t *testing.T) {
 		if _, got := claudeVersionOK(out); got != want {
 			t.Errorf("%q: %v", out, got)
 		}
+	}
+}
+
+func TestSyncWarnsAboutAnOldClaudeCode(t *testing.T) {
+	hub := newFakeHub(t, "tok")
+	bin := fakeClaude(t)
+	claudeEnv(t, hub)
+	if err := os.WriteFile(filepath.Join(bin, "version"), []byte("2.1.292 (Claude Code)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var results []*agentResult
+	var err error
+	out := captureStdout(t, func() { results, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
+	if err != nil {
+		t.Fatalf("an old Claude Code must be a warning, not a failure: %v\n%s", err, out)
+	}
+	want := "Claude Code 2.1.292 is older than 2.1.319: update it, or plugins published later won't arrive by themselves."
+	if !strings.Contains(out, "claude-code  warning: "+want+"\n") {
+		t.Errorf("sync doesn't warn:\n%s", out)
+	}
+	if summary := setupSummary(hub.URL, results); !strings.Contains(summary, "from its next start. "+want+"\n") {
+		t.Errorf("setup's summary doesn't warn:\n%s", summary)
+	}
+
+	// A recent one: no warning.
+	os.Remove(filepath.Join(bin, "version"))
+	out = captureStdout(t, func() { results, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
+	if err != nil || strings.Contains(out, "warning") || results[0].warning != "" {
+		t.Errorf("sync = %v, warned about a recent Claude Code:\n%s", err, out)
 	}
 }
 

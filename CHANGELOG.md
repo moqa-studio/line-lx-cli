@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - line-lx signs in for the hub's API, resource `<hub>/api`, not for its MCP server, `<hub>/mcp`. `login`, `setup` and the token refresh ask for the API, and no longer read the hub's protected resource metadata. This needs a hub that serves the API resource. `auth-header` prints the new token.
 - A sign-in from an earlier version is never sent to the hub: commands say to run `line-lx login`, `setup` signs in again, and `doctor` reports it.
 - `login` revokes the refresh token of the sign-in it replaces, as `logout` does.
+- Claude Code 2.1.319 or later is needed: an older one doesn't install a plugin published after setup by itself. `setup`, `sync` and `doctor` warn when `claude --version` is older, and say to update it.
+- line-lx sends `User-Agent: line-lx/<version>` with every request to the hub, so the hub can tell line-lx's own reads of the marketplace from Claude Code's.
+
+### Security
+
+- Built with Go 1.27.4, which fixes GO-2026-6859 in net/http.
 
 ### Upgrading
 
