@@ -19,6 +19,7 @@ type agentResult struct {
 	delivered, current, failed int
 	removed                    int    // plugins line-lx took out of the agent
 	connected                  string // Claude Code: what connecting it did
+	warning                    string // Claude Code: what the person should do, when its version is too old
 	skipped                    string // why the agent got nothing, when sync skipped it
 }
 
@@ -149,6 +150,9 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 		res := &agentResult{name: claudeTarget}
 		results = append(results, res)
 		msg, err := claudeConnect(api)
+		if err == nil {
+			res.warning = claudeOutdated()
+		}
 		switch {
 		case claudeSkipped(err):
 			res.skipped = err.Error()
@@ -160,6 +164,9 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 		default:
 			res.connected = msg
 			fmt.Printf("%-12s %s\n", claudeTarget, msg)
+			if res.warning != "" {
+				fmt.Printf("%-12s warning: %s.\n", claudeTarget, res.warning)
+			}
 		}
 	}
 
@@ -399,7 +406,7 @@ func runDoctor() error {
 			case err != nil:
 				fmt.Printf("warn %-12s can't tell Claude Code's version: %v\n", "", err)
 			case !good:
-				fmt.Printf("warn %-12s Claude Code %s can't sign in to the hub: update it to %s or later\n", "", version, minClaudeVersion)
+				fmt.Printf("warn %-12s %s\n", "", outdatedText(version))
 			default:
 				fmt.Printf("     %-12s Claude Code %s\n", "", version)
 			}
