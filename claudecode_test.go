@@ -640,7 +640,7 @@ func TestSetupSkipsSignInWhenSignedIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	hubURL, _ := checkHub(hub.URL)
-	if err := saveCreds(hubURL, &creds{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := saveCreds(hubURL, &creds{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour), Resource: hubURL + "/api"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -669,9 +669,13 @@ func TestSetupSignsInWhenNeeded(t *testing.T) {
 	t.Setenv("LINE_LX_TOKEN", "")
 	hubURL, _ := checkHub(hub.URL)
 
-	// No sign-in, then one the hub refuses: each time setup goes to the hub's OAuth (which this fake hub
-	// doesn't have, so the sign-in fails there).
-	for _, c := range []*creds{nil, {AccessToken: "revoked", ExpiresAt: time.Now().Add(time.Hour)}} {
+	// No sign-in, one the hub refuses, then one from an earlier line-lx: each time setup goes to the hub's
+	// OAuth (which this fake hub doesn't have, so the sign-in fails there).
+	for _, c := range []*creds{
+		nil,
+		{AccessToken: "revoked", ExpiresAt: time.Now().Add(time.Hour), Resource: hubURL + "/api"},
+		{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)},
+	} {
 		if c != nil {
 			if err := saveCreds(hubURL, c); err != nil {
 				t.Fatal(err)
