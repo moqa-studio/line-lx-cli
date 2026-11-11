@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- line-lx signs in for the hub's API, resource `<hub>/api`, not for its MCP server, `<hub>/mcp`. `login`, `setup` and the token refresh ask for the API, and no longer read the hub's protected resource metadata. This needs a hub that serves the API resource. `auth-header` prints the new token.
+- A sign-in from an earlier version is never sent to the hub: commands say to run `line-lx login`, `setup` signs in again, and `doctor` reports it.
+- `login` revokes the refresh token of the sign-in it replaces, as `logout` does.
+
+### Upgrading
+
+- Run `line-lx login` once after upgrading.
+
 ## [0.1.2] - 2026-11-10
 
 ### Added

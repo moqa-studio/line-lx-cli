@@ -104,11 +104,11 @@ Admins can connect Claude Code on every machine with [managed settings](https://
 Two environment variables, for CI and managed machines:
 
 - `LINE_LX_HUB`: the hub's URL, `https://host[/path]` (`http` only for localhost). Without it, line-lx uses the hub saved by `--hub`, else the Metro-LX cloud hub.
-- `LINE_LX_TOKEN`: a token every command uses instead of the keychain. It needs `LINE_LX_HUB` and goes only to that hub.
+- `LINE_LX_TOKEN`: a token for the hub's API (resource `<hub>/api`) that every command uses instead of the keychain. It needs `LINE_LX_HUB` and goes only to that hub.
 
 ## Where it stores things
 
-- **Sign-in**: the OS keychain, service `line-lx`, one entry per hub URL. On macOS, any process running as you can read this item. On Linux without a Secret Service on D-Bus (SSH boxes, containers), the sign-in goes to `<config dir>/line-lx/credentials/<hub id>.json`, mode 0600 in a 0700 folder.
+- **Sign-in**: tokens for the hub's API (resource `<hub>/api`), in the OS keychain, service `line-lx`, one entry per hub URL. On macOS, any process running as you can read this item. On Linux without a Secret Service on D-Bus (SSH boxes, containers), the sign-in goes to `<config dir>/line-lx/credentials/<hub id>.json`, mode 0600 in a 0700 folder.
 - **Config**: `<config dir>/line-lx/`, with the current hub in `config.json` and the sync lock in `sync.lock`. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
 - **Plugins**: Codex in `~/.codex/skills/<plugin>--<skill>/`, with records in `~/.codex/skills/.line-lx/`. pi in `~/.pi/agent/skills/<plugin>/<skill>/`. Claude Code keeps its own, installed from the hub's marketplace (see [Claude Code](#claude-code)).
 

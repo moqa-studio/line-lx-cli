@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,17 +117,13 @@ func discoveryServer(t *testing.T, edit func(doc map[string]string)) *httptest.S
 			"authorization_endpoint": srv.URL + "/api/auth/oauth2/authorize",
 			"token_endpoint":         srv.URL + "/api/auth/oauth2/token",
 			"registration_endpoint":  srv.URL + "/api/auth/oauth2/register",
-			"resource":               srv.URL + "/mcp",
 		}
 		edit(doc)
-		switch r.URL.Path {
-		case "/.well-known/oauth-authorization-server":
-			_ = json.NewEncoder(w).Encode(doc)
-		case "/.well-known/oauth-protected-resource/mcp":
-			_ = json.NewEncoder(w).Encode(map[string]string{"resource": doc["resource"]})
-		default:
+		if r.URL.Path != "/.well-known/oauth-authorization-server" {
 			http.NotFound(w, r)
+			return
 		}
+		_ = json.NewEncoder(w).Encode(doc)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -144,7 +141,6 @@ func TestDiscoverRefusesEndpointsElsewhere(t *testing.T) {
 		"another issuer":       func(d map[string]string) { d["issuer"] = "https://evil.example" },
 		"revocation elsewhere": func(d map[string]string) { d["revocation_endpoint"] = "https://evil.example/revoke" },
 		"registration missing": func(d map[string]string) { delete(d, "registration_endpoint") },
-		"another resource":     func(d map[string]string) { d["resource"] = "https://evil.example/mcp" },
 	} {
 		srv := discoveryServer(t, edit)
 		if _, err := discover(srv.URL); err == nil {
@@ -215,21 +211,36 @@ func TestRefusedRefreshMeansSignIn(t *testing.T) {
 	keyring.MockInit()
 	t.Setenv("LINE_LX_TOKEN", "")
 	var status int
-	var code string
+	var code, resource string
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/oauth-authorization-server":
 			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": srv.URL, "authorization_endpoint": srv.URL + "/authorize",
 				"token_endpoint": srv.URL + "/token", "registration_endpoint": srv.URL + "/register"})
-		case "/.well-known/oauth-protected-resource/mcp":
-			_ = json.NewEncoder(w).Encode(map[string]string{"resource": srv.URL + "/mcp"})
 		case "/token":
+			resource = r.FormValue("resource")
 			w.WriteHeader(status)
+			if status == http.StatusOK {
+				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "new", "expires_in": 3600})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 		}
 	}))
 	t.Cleanup(srv.Close)
+
+	// A refresh asks for the hub's API, and the new token stays for it.
+	status = http.StatusOK
+	if err := saveCreds(srv.URL, &creds{ClientID: "c", AccessToken: "old", RefreshToken: "r", Resource: srv.URL + "/api"}); err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := keychainToken(srv.URL); err != nil || tok != "new" || resource != srv.URL+"/api" {
+		t.Fatalf("refresh = %q, %v, for resource %q", tok, err, resource)
+	}
+	if c, _ := loadCreds(srv.URL); c.Resource != srv.URL+"/api" || c.RefreshToken != "r" {
+		t.Errorf("refreshed sign-in = %+v", c)
+	}
 
 	for _, c := range []struct {
 		status int
@@ -237,6 +248,7 @@ func TestRefusedRefreshMeansSignIn(t *testing.T) {
 		signIn bool
 	}{
 		{http.StatusBadRequest, "invalid_grant", true},
+		{http.StatusBadRequest, "invalid_target", true},
 		{http.StatusUnauthorized, "invalid_client", true}, // the hub no longer knows line-lx's OAuth client
 		{http.StatusBadRequest, "invalid_client", true},
 		{http.StatusTooManyRequests, "", false}, // a rate limit, not a refusal
@@ -244,12 +256,28 @@ func TestRefusedRefreshMeansSignIn(t *testing.T) {
 		{http.StatusBadGateway, "", false},
 	} {
 		status, code = c.status, c.code
-		if err := saveCreds(srv.URL, &creds{ClientID: "c", AccessToken: "old", RefreshToken: "r", ExpiresAt: time.Now()}); err != nil {
+		if err := saveCreds(srv.URL, &creds{ClientID: "c", AccessToken: "old", RefreshToken: "r", ExpiresAt: time.Now(), Resource: srv.URL + "/api"}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := keychainToken(srv.URL)
 		if signIn := errors.As(err, new(errNotSignedIn)); err == nil || signIn != c.signIn {
 			t.Errorf("refresh answered %d %s: err = %v, sign in again = %v", c.status, c.code, err, signIn)
+		}
+	}
+}
+
+func TestEarlierSignInMeansSignIn(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("LINE_LX_TOKEN", "")
+	hub := "https://hub.example.com"
+	// Earlier versions signed in for the hub's MCP server and stored no resource: never sent to the API.
+	for _, resource := range []string{"", hub + "/mcp"} {
+		if err := saveCreds(hub, &creds{AccessToken: "tok", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour), Resource: resource}); err != nil {
+			t.Fatal(err)
+		}
+		tok, err := keychainToken(hub)
+		if !errors.As(err, new(errNotSignedIn)) || tok != "" || !strings.Contains(err.Error(), "Run `line-lx login`") {
+			t.Errorf("resource %q: token %q, %v", resource, tok, err)
 		}
 	}
 }
@@ -268,7 +296,7 @@ func noKeychainHere(t *testing.T) {
 func TestSignInFileWithoutKeychain(t *testing.T) {
 	noKeychainHere(t)
 	hub := "https://hub.example.com"
-	if err := saveCreds(hub, &creds{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := saveCreds(hub, &creds{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour), Resource: hub + "/api"}); err != nil {
 		t.Fatal(err)
 	}
 	path, _ := credPath(hub)
@@ -400,5 +428,57 @@ func TestAuthHeaderStaysOnItsHub(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if out, err := run(); !errors.As(err, new(errNotSignedIn)) || out != "" {
 		t.Errorf("auth-header without a sign-in = %q, %v", out, err)
+	}
+}
+
+func TestLoginRevokesThePreviousSignIn(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LINE_LX_TOKEN", "")
+	var revoked url.Values
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": srv.URL, "authorization_endpoint": srv.URL + "/authorize",
+				"token_endpoint": srv.URL + "/token", "registration_endpoint": srv.URL + "/register", "revocation_endpoint": srv.URL + "/revoke"})
+		case "/register":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "new-client"})
+		case "/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "new", "refresh_token": "new-r", "expires_in": 3600})
+		case "/revoke":
+			_ = r.ParseForm()
+			revoked = r.PostForm
+		case "/api/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]string{"name": "Ada"}, "org": map[string]string{"name": "Moqa"}})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	// The browser: the person signs in, and the hub sends them back to line-lx with a code.
+	browser := openBrowser
+	t.Cleanup(func() { openBrowser = browser })
+	openBrowser = func(u string) {
+		asked, _ := url.Parse(u)
+		back := asked.Query().Get("redirect_uri") + "?" + url.Values{"code": {"c"}, "state": {asked.Query().Get("state")}}.Encode()
+		go func() {
+			if res, err := http.Get(back); err == nil {
+				res.Body.Close()
+			}
+		}()
+	}
+
+	if err := saveCreds(srv.URL, &creds{ClientID: "old-client", RefreshToken: "old-r", Resource: srv.URL + "/api"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := login(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if revoked.Get("token") != "old-r" || revoked.Get("client_id") != "old-client" || revoked.Get("token_type_hint") != "refresh_token" {
+		t.Errorf("revoked %v, want the previous refresh token", revoked)
+	}
+	if c, _ := loadCreds(srv.URL); c == nil || c.RefreshToken != "new-r" || c.ClientID != "new-client" {
+		t.Errorf("saved sign-in = %+v", c)
 	}
 }
