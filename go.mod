@@ -3,7 +3,7 @@ module github.com/moqa-studio/line-lx-cli
 go 1.27.4
 
 require (
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
 )
