@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,9 +31,9 @@ import (
 // The hub takes the person from the token, and counts the version line-lx reads in Claude Code's cache only
 // if it delivered that version to that person.
 
-// usageWait bounds a report from the start of the command, reading stdin and the sign-in's refresh
-// included. With the count
-// of a dropped report (dropLockWait at most), report-usage ends within 3 seconds.
+// usageWait bounds a report from the start of the command: reading stdin, finding the plugin, the
+// sign-in's refresh and the request. With the count of a dropped report (dropLockWait at most),
+// report-usage ends within 3 seconds.
 var usageWait = 2500 * time.Millisecond
 
 // dropLockWait is how long a dropped report waits for another line-lx to finish counting its own.
@@ -121,9 +122,22 @@ type installedWorkspace struct {
 	copies []pluginCopy // every plugin Claude Code installed, from any marketplace
 }
 
+// openRegular opens a file only when it is a plain one (a symlink to one is fine): opening a FIFO or a
+// device can wait forever.
+func openRegular(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s isn't a plain file", path)
+	}
+	return os.Open(path)
+}
+
 // readJSONFile decodes a file of at most maxSettings bytes.
 func readJSONFile(path string, out any) error {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return err
 	}
@@ -272,7 +286,7 @@ func skillIn(dir, plugin, name string) (string, bool) {
 
 // frontmatterName is the `name:` of a SKILL.md's frontmatter, or "".
 func frontmatterName(path string) string {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return ""
 	}
@@ -411,11 +425,14 @@ func countDropped(now time.Time) error {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s isn't a plain file (a symlink?), so line-lx won't use it", path)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|openNoFollow, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil { // a file that was there before keeps its mode otherwise
+		return err
+	}
 	for deadline := time.Now().Add(dropLockWait); ; time.Sleep(10 * time.Millisecond) {
 		locked, err := tryLock(f)
 		if err != nil {
@@ -462,6 +479,42 @@ func droppedText(d dropped) string {
 
 // --- The command ---
 
+// errNoReport: the input isn't a use of the workspace's plugins, or not surely. Nothing leaves the machine.
+var errNoReport = errors.New("nothing to report")
+
+// reportUsage reads the hook's input, finds the workspace's plugin and sends the report, once. It sets
+// sending when the report is about to go: past that point, a failure is a dropped report.
+func reportUsage(agent, slug string, stdin io.Reader, sending *atomic.Bool) error {
+	data, err := io.ReadAll(io.LimitReader(stdin, maxHookInput+1))
+	var in hookInput
+	if err != nil || len(data) > maxHookInput || json.Unmarshal(data, &in) != nil {
+		return errNoReport
+	}
+	u, ok := readUsage(in)
+	if !ok {
+		return errNoReport
+	}
+	hub, err := currentHub()
+	if err != nil {
+		return errNoReport
+	}
+	w, err := claudeWorkspace(hub, slug)
+	if err != nil {
+		return errNoReport
+	}
+	r := usageReport{Workspace: slug, Agent: agent, Kind: u.kind, Trigger: u.trigger, Success: u.success}
+	if u.tool != "" {
+		r.Plugin, r.Version, r.Name, ok = w.mcpTool(u.tool)
+	} else {
+		r.Plugin, r.Version, r.Name, ok = w.skill(u.skill, in.Cwd)
+	}
+	if !ok {
+		return errNoReport // not the workspace's, or not surely: it stays on this machine
+	}
+	sending.Store(true)
+	return sendUsage(hub, r)
+}
+
 // runReportUsage is what the hub's hook runs. It always returns nil: a report never fails the agent. What
 // went wrong goes to stderr, which Claude Code shows only in its debug log, and drops are counted for
 // `line-lx doctor`.
@@ -476,55 +529,24 @@ func runReportUsage(agent, slug string, stdin io.Reader) error {
 	if agent != claudeTarget || !validName(slug) || !validName("metro-"+slug) {
 		return nil // an agent this line-lx doesn't know yet
 	}
-	// Reading stdin is part of the run's time: a stdin that never ends doesn't hold line-lx.
-	input := make(chan []byte, 1)
-	go func() {
-		data, err := io.ReadAll(io.LimitReader(stdin, maxHookInput+1))
-		if err != nil {
-			data = nil
+	// Everything runs under one deadline: a stdin that never ends, a folder that hangs or a hub that
+	// doesn't answer never holds line-lx. What still runs past it ends with the process.
+	var sending atomic.Bool
+	done := make(chan error, 1)
+	go func() { done <- reportUsage(agent, slug, stdin, &sending) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Until(start.Add(usageWait))):
+		if !sending.Load() {
+			return nil // nothing to send yet: nothing was dropped
 		}
-		input <- data
-	}()
-	var data []byte
-	select {
-	case data = <-input:
-	case <-time.After(time.Until(start.Add(usageWait))):
+		err = fmt.Errorf("The hub didn't answer within %s", usageWait)
+	}
+	switch {
+	case errors.Is(err, errNoReport):
 		return nil
-	}
-	var in hookInput
-	if len(data) > maxHookInput || json.Unmarshal(data, &in) != nil {
-		return nil
-	}
-	u, ok := readUsage(in)
-	if !ok {
-		return nil
-	}
-	hub, err := currentHub()
-	if err != nil {
-		return nil
-	}
-	w, err := claudeWorkspace(hub, slug)
-	if err != nil {
-		return nil
-	}
-	r := usageReport{Workspace: slug, Agent: agent, Kind: u.kind, Trigger: u.trigger, Success: u.success}
-	if u.tool != "" {
-		r.Plugin, r.Version, r.Name, ok = w.mcpTool(u.tool)
-	} else {
-		r.Plugin, r.Version, r.Name, ok = w.skill(u.skill, in.Cwd)
-	}
-	if !ok {
-		return nil // not the workspace's, or not surely: it stays on this machine
-	}
-
-	sent := make(chan error, 1)
-	go func() { sent <- sendUsage(hub, r) }()
-	select {
-	case err = <-sent:
-	case <-time.After(time.Until(start.Add(usageWait))):
-		err = fmt.Errorf("The hub at %s didn't answer within %s", hub, usageWait)
-	}
-	if err == nil {
+	case err == nil:
 		clearDropped()
 		return nil
 	}

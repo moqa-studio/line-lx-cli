@@ -579,6 +579,43 @@ func TestReportUsageEndsWithin3Seconds(t *testing.T) {
 	}
 }
 
+// The count is a plain file only the person can read: a symlink there is refused, and a file others could
+// read becomes private.
+func TestDroppedCountFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	path, err := droppedPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, path, `{"count":1,"since":"2026-11-19T10:00:00Z"}`)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := countDropped(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, %v; want 0600", info.Mode().Perm(), err)
+	}
+	if d := readDropped(); d.Count != 2 {
+		t.Errorf("dropped = %+v, want 2", d)
+	}
+
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	putFile(t, target, "{}")
+	os.Remove(path)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := countDropped(time.Now()); err == nil {
+		t.Error("countDropped wrote through a symlink")
+	}
+	if got := read(t, target); got != "{}" {
+		t.Errorf("the symlink's target is now %q", got)
+	}
+}
+
 func TestReportUsageWithoutHub(t *testing.T) {
 	hub := newUsageHub(t)
 	project := usageMachine(t, hub.URL)
