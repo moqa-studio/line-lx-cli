@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,11 @@ func TestHubClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if ua := r.Header.Get("User-Agent"); ua != "line-lx/"+version { // the hub tells line-lx from Claude Code
+			w.WriteHeader(http.StatusTeapot)
+			fmt.Fprintf(w, `{"error":{"message":"User-Agent %q"}}`, ua)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/versions") && r.URL.RawQuery != "limit=1" {

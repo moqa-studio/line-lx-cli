@@ -18,6 +18,17 @@ import (
 var httpClient = &http.Client{
 	Timeout:       30 * time.Second,
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Transport:     userAgent{http.DefaultTransport},
+}
+
+// userAgent names line-lx and its version in every request, `line-lx/<version>`: the hub tells line-lx's
+// own reads from Claude Code's.
+type userAgent struct{ next http.RoundTripper }
+
+func (u userAgent) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("User-Agent", "line-lx/"+version)
+	return u.next.RoundTrip(req)
 }
 
 // limited caps what line-lx reads from any answer, so a hub can't exhaust memory.

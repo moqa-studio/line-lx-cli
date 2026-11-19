@@ -49,6 +49,20 @@ func main() {
 	}
 	setup.Flags().StringVar(&hubFlag, "hub", "", "the Metro-LX hub's URL (remembered for the next commands)")
 
+	// The hub's hook runs it after each use: whatever its flags, arguments or input, it exits 0.
+	var agentFlag, workspaceFlag string
+	reportUsage := &cobra.Command{
+		Use:                "report-usage",
+		Short:              "Report one use of your org's plugins to the hub: what the hub's Claude Code hook runs",
+		Args:               cobra.ArbitraryArgs,
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportUsage(agentFlag, workspaceFlag, cmd.InOrStdin())
+		},
+	}
+	reportUsage.Flags().StringVar(&agentFlag, "agent", "", "the agent that ran it: claude-code")
+	reportUsage.Flags().StringVar(&workspaceFlag, "workspace", "", "the workspace's slug")
+
 	root.AddCommand(
 		setup,
 		login,
@@ -64,6 +78,7 @@ func main() {
 			RunE: func(*cobra.Command, []string) error { return runDoctor() }},
 		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runAuthHeader() }},
+		reportUsage,
 	)
 
 	if err := root.Execute(); err != nil {

@@ -87,6 +87,8 @@ func setupSummary(hub string, results []*agentResult) string {
 			msg = r.connected
 			if r.failed > 0 {
 				msg = "not connected: see above, or run `line-lx doctor`."
+			} else if r.warning != "" {
+				msg += " " + r.warning + "."
 			}
 			fmt.Fprintf(&b, "  %-12s %s\n", agentName(r.name), msg)
 			continue

@@ -40,6 +40,7 @@ type creds struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	Resource     string    `json:"resource"` // the tokens' audience; earlier versions didn't store it
 }
 
 // --- Config: the current hub ---
@@ -129,6 +130,10 @@ func keychainToken(hub string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Earlier versions signed in for the hub's MCP server, whose tokens the API refuses.
+	if c.Resource != apiResource(hub) {
+		return "", errNotSignedIn{fmt.Sprintf("Your sign-in to %s is from an earlier line-lx. Run `line-lx login`.", hub)}
+	}
 	if !needsRefresh(c, time.Now()) {
 		return c.AccessToken, nil
 	}
@@ -145,7 +150,7 @@ func keychainToken(hub string) (string, error) {
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {c.RefreshToken},
 		"client_id":     {c.ClientID},
-		"resource":      {oauth.Resource},
+		"resource":      {c.Resource},
 	})
 	// The hub refusing the refresh (any 4xx but a rate limit: invalid_grant, or invalid_client for a
 	// client it no longer has) means signing in again; a network or server error is just reported.
@@ -156,7 +161,7 @@ func keychainToken(hub string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Can't refresh the sign-in: %v", err)
 	}
-	fresh.ClientID = c.ClientID
+	fresh.ClientID, fresh.Resource = c.ClientID, c.Resource
 	if fresh.RefreshToken == "" {
 		fresh.RefreshToken = c.RefreshToken
 	}
@@ -234,21 +239,17 @@ type oauthConfig struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	RegistrationEndpoint  string `json:"registration_endpoint"`
 	RevocationEndpoint    string `json:"revocation_endpoint"`
-	// Tokens must be issued for the hub's protected resource (their audience), or the API rejects them.
-	Resource string `json:"-"`
 }
+
+// apiResource is the hub's API, the resource (RFC 8707) line-lx asks tokens for: the API refuses tokens
+// issued for anything else, such as the hub's MCP server.
+func apiResource(hub string) string { return hub + "/api" }
 
 // discover reads the hub's OAuth metadata. The authorization endpoint is opened in the browser, so every
 // endpoint must be on the hub itself: a hub can't send line-lx (or the browser opener) anywhere else.
-// The protected resource is the hub's MCP server, <hub>/mcp; its metadata must name exactly that
-// resource (RFC 9728).
 func discover(hub string) (*oauthConfig, error) {
 	var oc oauthConfig
 	if err := getJSON(hub+"/.well-known/oauth-authorization-server", &oc); err != nil {
-		return nil, err
-	}
-	var pr struct{ Resource string }
-	if err := getJSON(hub+"/.well-known/oauth-protected-resource/mcp", &pr); err != nil {
 		return nil, err
 	}
 	hubURL, _ := url.Parse(hub)
@@ -256,13 +257,12 @@ func discover(hub string) (*oauthConfig, error) {
 		u, err := url.Parse(endpoint)
 		return err == nil && allowedScheme(u) && u.Host == hubURL.Host && u.User == nil
 	}
-	ok := strings.TrimRight(oc.Issuer, "/") == hub && pr.Resource == hub+"/mcp" &&
+	ok := strings.TrimRight(oc.Issuer, "/") == hub &&
 		onHub(oc.AuthorizationEndpoint) && onHub(oc.TokenEndpoint) && onHub(oc.RegistrationEndpoint) &&
 		(oc.RevocationEndpoint == "" || onHub(oc.RevocationEndpoint))
 	if !ok {
 		return nil, fmt.Errorf("The hub at %s announces OAuth endpoints that aren't its own, so line-lx won't use them.", hub)
 	}
-	oc.Resource = pr.Resource
 	return &oc, nil
 }
 
@@ -409,7 +409,7 @@ func login(hub string) (*me, error) {
 		"state":                 {state},
 		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
 		"code_challenge_method": {"S256"},
-		"resource":              {oauth.Resource},
+		"resource":              {apiResource(hub)},
 	}.Encode()
 
 	done := make(chan callbackResult, 1)
@@ -441,12 +441,14 @@ func login(hub string) (*me, error) {
 		"redirect_uri":  {redirectURI},
 		"client_id":     {clientID},
 		"code_verifier": {verifier},
-		"resource":      {oauth.Resource},
+		"resource":      {apiResource(hub)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Sign-in failed: %v.", err)
 	}
-	c.ClientID = clientID
+	c.ClientID, c.Resource = clientID, apiResource(hub)
+	// The sign-in this one replaces, if any: revoked once the new one is saved.
+	previous, _ := loadCreds(hub)
 	// The hub first: a failed config write must not leave a sign-in the next commands can't find.
 	if err := saveHub(hub); err != nil {
 		return nil, fmt.Errorf("Can't save the hub in the config: %v", err)
@@ -454,6 +456,7 @@ func login(hub string) (*me, error) {
 	if err := saveCreds(hub, c); err != nil {
 		return nil, err
 	}
+	revoke(oauth, previous)
 
 	// Use the fresh token, not LINE_LX_TOKEN, to confirm who just signed in.
 	api := &hubClient{hub: hub, token: c.AccessToken}
@@ -496,7 +499,8 @@ func registerClient(endpoint, redirectURI string) (string, error) {
 	return out.ClientID, nil
 }
 
-func openBrowser(u string) {
+// openBrowser is a variable so tests can play the browser.
+var openBrowser = func(u string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -523,14 +527,22 @@ func runLogout() error {
 		return err
 	}
 	fmt.Printf("Signed out of %s.\n", hub)
-	// Best effort: revoke the refresh token at the hub, so a copy of the keychain entry is useless.
 	if c != nil && c.RefreshToken != "" {
-		if oauth, err := discover(hub); err == nil && oauth.RevocationEndpoint != "" {
-			form := url.Values{"token": {c.RefreshToken}, "token_type_hint": {"refresh_token"}, "client_id": {c.ClientID}}
-			if res, err := httpClient.PostForm(oauth.RevocationEndpoint, form); err == nil {
-				res.Body.Close()
-			}
+		if oauth, err := discover(hub); err == nil {
+			revoke(oauth, c)
 		}
 	}
 	return nil
+}
+
+// revoke revokes a sign-in's refresh token at the hub, so a copy of its keychain entry is useless. Best
+// effort: a failure changes nothing.
+func revoke(oauth *oauthConfig, c *creds) {
+	if c == nil || c.RefreshToken == "" || oauth.RevocationEndpoint == "" {
+		return
+	}
+	form := url.Values{"token": {c.RefreshToken}, "token_type_hint": {"refresh_token"}, "client_id": {c.ClientID}}
+	if res, err := httpClient.PostForm(oauth.RevocationEndpoint, form); err == nil {
+		res.Body.Close()
+	}
 }

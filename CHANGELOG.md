@@ -6,9 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `report-usage --agent claude-code --workspace <slug>` reports one use of the workspace's plugins to the hub: the plugin and the version Claude Code installed, the skill or MCP tool, the kind of use, who started it and whether it succeeded. The hub's Claude Code hook runs it while the workspace's agent reporting is on. It sends a name only when it belongs to a plugin Claude Code installed from the workspace's marketplace on the current hub, and a bare skill name only when no other skill or command Claude Code can find has it. It never sends commands, arguments, prompts, paths or session identifiers. It ends within 3 seconds, never retries, and always exits 0.
+- `doctor` shows how many usage reports were dropped since when, until one reaches the hub again.
+
+## [0.2.0] - 2026-11-19
+
+### Changed
+
+- line-lx signs in for the hub's API, resource `<hub>/api`, not for its MCP server, `<hub>/mcp`. `login`, `setup` and the token refresh ask for the API, and no longer read the hub's protected resource metadata. This needs a hub that serves the API resource. `auth-header` prints the new token.
+- A sign-in from an earlier version is never sent to the hub: commands say to run `line-lx login`, `setup` signs in again, and `doctor` reports it.
+- `login` revokes the refresh token of the sign-in it replaces, as `logout` does.
+- Claude Code 2.1.319 or later is needed: an older one doesn't install a plugin published after setup by itself. `setup`, `sync` and `doctor` warn when `claude --version` is older, and say to update it.
+- line-lx sends `User-Agent: line-lx/<version>` with every request to the hub, so the hub can tell line-lx's own reads of the marketplace from Claude Code's.
+
 ### Security
 
 - Built with Go 1.27.4, which fixes GO-2026-6859 in net/http.
+
+### Upgrading
+
+- Run `line-lx login` once after upgrading.
 
 ## [0.1.2] - 2026-11-10
 
@@ -42,7 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/moqa-studio/line-lx-cli/releases/tag/v0.1.0
