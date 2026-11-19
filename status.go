@@ -774,18 +774,18 @@ func renderAgent(w io.Writer, a statusAgent, now time.Time, c painter) {
 		return
 	}
 
-	// The columns: as wide as their longest cell, cut so that a row fits in 80 columns.
+	// The columns: as wide as their longest cell. Names and versions are never cut: a version can be a
+	// bundle's 12-character hash, and "behind: " another one.
 	type row struct{ name, version, status, installed, updated string }
 	rows := make([]row, len(a.Plugins))
 	head := row{"PLUGIN", "VERSION", "STATUS", "INSTALLED", "UPDATED"}
 	wn, wv, ws, wi := len(head.name), len(head.version), len(head.status), len(head.installed)
 	for i, p := range a.Plugins {
-		r := row{name: fit(p.Name, 20), version: "–", installed: "–", updated: "–"}
+		r := row{name: p.Name, version: "–", installed: "–", updated: "–"}
 		if p.Version != nil {
-			r.version = fit(*p.Version, 12)
+			r.version = *p.Version
 		}
 		r.status, _ = statusText(p, c)
-		r.status = fit(r.status, 18)
 		if p.State != pluginMissing { // the hub's times are the person's, on any machine: only when it is here
 			r.installed, r.updated = ago(firstOf(p.InstalledAt, p.FirstDeliveredAt), now), ago(firstOf(p.UpdatedAt, p.LastDeliveredAt), now)
 		}
@@ -822,8 +822,12 @@ func renderAgent(w io.Writer, a statusAgent, now time.Time, c painter) {
 	}
 }
 
+// descriptionRoom is the least room a description gets on its name's line; with less, it goes under it.
+const descriptionRoom = 20
+
 // renderChildren writes a plugin's tree: where it came from, when that isn't the current hub, then its
-// skills and its hooks, each cut to fit in 80 columns.
+// skills and its hooks. Names are whole; a description (or a hook's command) is cut to fit in 80 columns,
+// on the name's line, or on the next one when a long name leaves too little room.
 func renderChildren(w io.Writer, p statusPlugin, c painter) {
 	type child struct{ kind, name, text string }
 	var children []child
@@ -836,27 +840,32 @@ func renderChildren(w io.Writer, p statusPlugin, c painter) {
 	for _, h := range p.Hooks {
 		children = append(children, child{"hook", h.Event, h.Command})
 	}
-	if p.Bundle && len(p.Hooks) == 0 && p.State != pluginMissing {
-		children = append(children, child{"hook", "none", ""})
-	}
+	// The descriptions line up after the names, unless a name is so long the others would have no room.
+	const kindWidth = 11 // "  ├─ skill "
 	wn := 0
 	for _, ch := range children {
-		if ch.text != "" {
-			wn = max(wn, min(utf8.RuneCountInString(ch.name), 24))
+		if n := utf8.RuneCountInString(ch.name); ch.text != "" && kindWidth+n+2+descriptionRoom <= statusWidth {
+			wn = max(wn, n)
 		}
 	}
 	for i, ch := range children {
-		branch := "├─ "
+		branch, under := "├─ ", "│  "
 		if i == len(children)-1 {
-			branch = "└─ "
+			branch, under = "└─ ", "   "
 		}
 		head := "  " + branch + pad(ch.kind, 5) + " "
 		if ch.text == "" {
-			fmt.Fprintln(w, c.dim(head)+fit(ch.name, statusWidth-utf8.RuneCountInString(head)))
+			fmt.Fprintln(w, c.dim(head)+ch.name)
 			continue
 		}
-		head += pad(fit(ch.name, 24), wn) + "  "
-		fmt.Fprintln(w, c.dim(head)+c.dim(fit(ch.text, statusWidth-utf8.RuneCountInString(head))))
+		head += pad(ch.name, wn) + "  "
+		if room := statusWidth - utf8.RuneCountInString(head); room >= descriptionRoom {
+			fmt.Fprintln(w, c.dim(head)+c.dim(fit(ch.text, room)))
+			continue
+		}
+		fmt.Fprintln(w, c.dim(strings.TrimRight(head, " ")))
+		indent := "  " + under + "      "
+		fmt.Fprintln(w, c.dim(indent+fit(ch.text, statusWidth-utf8.RuneCountInString(indent))))
 	}
 }
 

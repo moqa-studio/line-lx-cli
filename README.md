@@ -82,13 +82,13 @@ Hub        https://hub.example.com
 Workspace  Acme (acme)
 
 Claude Code  connected · metro-acme · marketplace fetched 2 h ago
-  PLUGIN           VERSION       STATUS         INSTALLED  UPDATED
-  moqa-kit         1.0.0         behind: 1.1.0  9 d ago    9 d ago
+  PLUGIN           VERSION       STATUS                INSTALLED  UPDATED
+  moqa-kit         1.0.0         behind: 1.1.0         9 d ago    9 d ago
   └─ skill review  Review a pull request
-  posthog-dev-kit  1.3.0         up to date     18 d ago   8 h ago
+  posthog-dev-kit  1.3.0         up to date            18 d ago   8 h ago
   ├─ skill board-apple-ads  Build and maintain an Apple Ads dashboard that answ…
   └─ skill capture          Capture an event
-  metro-lx         13cd9935af1d  up to date     6 d ago    6 d ago
+  metro-lx         13cd9935af1d  behind: 2f0c81d4a9e7  6 d ago    6 d ago
   └─ hook  PostToolUse  line-lx report-usage --agent claude-code --workspace ac…
   Claude Code catches up with the hub by itself, in its next session.
 
@@ -106,7 +106,7 @@ pi           not found
 - **States.** `behind`: the version here isn't the hub's latest. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone.
 - **Without the hub.** Not signed in, a sign-in the hub refuses, a hub that doesn't answer, or one too old to have `GET /api/me/installed` (404): line-lx shows what this machine has, and says why.
 - It writes nothing, installs nothing and runs no agent. Like every command, it refreshes an expired sign-in. It never prints the token. It exits 0, unless the configured hub URL isn't valid.
-- The output fits in 80 columns. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`.
+- The output fits in 80 columns where it can. Plugin and skill names and versions are never cut, so a long one widens its column; a description or a hook's command is cut to fit, and goes on the next line when a long name leaves it too little room. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`.
 
 ### `status --json`
 

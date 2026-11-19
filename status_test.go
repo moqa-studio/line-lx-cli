@@ -70,7 +70,7 @@ func statusAnswer(hub string) string {
 	}
 	return `{"workspace": {"slug": "dev", "name": "Dev"}, "hub": "` + hub + `", "agents": [
     {"target": "claude-code", "lastFetchedAt": "2026-11-19T08:00:00Z", "plugins": ` + plugins("1.2.0") + `,
-      {"name": "metro-lx", "latestVersion": "13cd9935af1d", "deliveredVersion": "13cd9935af1d", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-12T10:00:00Z", "behind": false,
+      {"name": "metro-lx", "latestVersion": "a1b2c3d4e5f6", "deliveredVersion": "13cd9935af1d", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-12T10:00:00Z", "behind": true,
        "skills": [], "hooks": [{"event": "PostToolUse", "command": "line-lx report-usage --agent claude-code --workspace dev"}]}]},
     {"target": "codex", "lastFetchedAt": null, "plugins": ` + plugins("1.1.0") + `]},
     {"target": "pi", "lastFetchedAt": null, "plugins": ` + plugins("1.2.0") + `]},
@@ -133,15 +133,15 @@ func statusMachine(t *testing.T, hub string) string {
 	codex := filepath.Join(home, ".codex", "skills")
 	putFile(t, filepath.Join(codex, ".line-lx", "notes.json"), `{"hub": "`+hub+`", "plugin": "notes", "version": "1.1.0", "versionId": "v11", "syncedAt": "2026-11-17T12:00:00Z", "skills": ["jot"]}`)
 	putFile(t, filepath.Join(codex, "notes--jot", "SKILL.md"), "---\nname: jot\ndescription: Jot a note\n---\n")
-	putFile(t, filepath.Join(codex, ".line-lx", "old.json"), `{"hub": "`+hub+`", "plugin": "old", "version": "2.0.0", "versionId": "v2", "syncedAt": "2026-09-01T12:00:00Z", "skills": ["gone"]}`)
-	putFile(t, filepath.Join(codex, "old--gone", "SKILL.md"), "---\nname: gone\n---\n")
+	putFile(t, filepath.Join(codex, ".line-lx", "an-old-plugin-with-a-long-name.json"), `{"hub": "`+hub+`", "plugin": "an-old-plugin-with-a-long-name", "version": "2.0.0", "versionId": "v2", "syncedAt": "2026-09-01T12:00:00Z", "skills": ["gone"]}`)
+	putFile(t, filepath.Join(codex, "an-old-plugin-with-a-long-name--gone", "SKILL.md"), "---\nname: gone\n---\n")
 
 	pi := filepath.Join(home, ".pi", "agent", "skills")
 	putFile(t, filepath.Join(pi, "notes", ".line-lx.json"), `{"hub": "`+hub+`", "plugin": "notes", "version": "1.2.0", "versionId": "v12", "syncedAt": "2026-11-19T11:58:00Z"}`)
 	putFile(t, filepath.Join(pi, "notes", "jot", "SKILL.md"), "---\nname: jot\ndescription: Jot a note\n---\n")
 	putFile(t, filepath.Join(pi, "notes", "summary", "SKILL.md"), "---\nname: summary\n---\n")
 	putFile(t, filepath.Join(pi, "theirs", ".line-lx.json"), `{"hub": "https://other.example.com", "plugin": "theirs", "version": "3.0.0", "versionId": "x", "syncedAt": "2026-11-19T11:00:00Z"}`)
-	putFile(t, filepath.Join(pi, "theirs", "help", "SKILL.md"), "---\nname: help\n---\n")
+	putFile(t, filepath.Join(pi, "theirs", "help-with-everything-that-the-other-hub-has-to-offer", "SKILL.md"), "---\nname: help-with-everything-that-the-other-hub-has-to-offer\ndescription: Helps with what the other hub offers, from start to end\n---\n")
 	return home
 }
 
@@ -287,28 +287,28 @@ const statusGolden = `Hub        HUB
 Workspace  Dev (dev)
 
 Claude Code  connected · metro-dev · marketplace fetched 2 h ago
-  PLUGIN    VERSION       STATUS         INSTALLED  UPDATED
-  notes     1.2.0         up to date     18 d ago   27 h ago
+  PLUGIN    VERSION       STATUS                INSTALLED  UPDATED
+  notes     1.2.0         up to date            18 d ago   27 h ago
   ├─ skill jot      Jot a note, quickly
   └─ skill summary  Sum up the notes of the day
-  tools     1.0.0         behind: 1.1.0  9 d ago    9 d ago
+  tools     1.0.0         behind: 1.1.0         9 d ago    9 d ago
   └─ skill lint  Lint the repository
-  extra     –             not installed  –          –
+  extra     –             not installed         –          –
   └─ skill help  Help
-  metro-lx  13cd9935af1d  up to date     18 d ago   7 d ago
+  metro-lx  13cd9935af1d  behind: a1b2c3d4e5f6  18 d ago   7 d ago
   ├─ hook  PostToolUse         line-lx report-usage --agent claude-code --works…
   └─ hook  PostToolUseFailure  line-lx report-usage --agent claude-code --works…
   Run ` + "`line-lx sync`" + `, or start Claude Code, to install what's missing.
 
 Codex        set up · ~/.codex/skills · synced 2 d ago
-  PLUGIN  VERSION  STATUS          INSTALLED  UPDATED
-  notes   1.1.0    behind: 1.2.0   18 d ago   2 d ago
-  └─ skill jot  Jot a note
-  old     2.0.0    not in the hub  –          2026-09-01
+  PLUGIN                          VERSION  STATUS          INSTALLED  UPDATED
+  an-old-plugin-with-a-long-name  2.0.0    not in the hub  –          2026-09-01
   └─ skill gone
-  extra   –        not installed   –          –
+  notes                           1.1.0    behind: 1.2.0   18 d ago   2 d ago
+  └─ skill jot  Jot a note
+  extra                           –        not installed   –          –
   └─ skill help  Help
-  tools   –        not installed   –          –
+  tools                           –        not installed   –          –
   └─ skill lint  Lint the repository
   Run ` + "`line-lx sync`" + ` to catch up with the hub.
 
@@ -319,7 +319,8 @@ pi           set up · ~/.pi/agent/skills · synced 2 min ago
   └─ skill summary  Sum up the notes of the day
   theirs  3.0.0    other hub      –          1 h ago
   ├─ from  https://other.example.com
-  └─ skill help
+  └─ skill help-with-everything-that-the-other-hub-has-to-offer
+           Helps with what the other hub offers, from start to end
   extra   –        not installed  –          –
   └─ skill help  Help
   tools   –        not installed  –          –
