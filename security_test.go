@@ -185,8 +185,16 @@ func TestCallbackIgnoresAnotherState(t *testing.T) {
 }
 
 func TestClean(t *testing.T) {
-	if got := clean("ok\x1b[31m red\n\u009b‮​"); got != "ok[31m red" {
-		t.Errorf("clean = %q", got)
+	for in, want := range map[string]string{
+		"ok\x1b[31m red\n\u009b‮​":                  "ok red", // CSI, a lone C1 CSI, bidi, zero-width
+		"Moqa\x1b[2J\x1b[1;31m Studio\u009b2K":      "Moqa Studio",
+		"a\x1b]0;title\x07b\x1b]8;;http://x\x1b\\c": "abc", // OSC: a window title, a hyperlink
+		"a\x1bcb\x1b(B":                             "ab",  // a reset, a charset
+		"1.2.0 [beta]":                              "1.2.0 [beta]",
+	} {
+		if got := clean(in); got != want {
+			t.Errorf("clean(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

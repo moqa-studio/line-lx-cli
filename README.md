@@ -65,12 +65,80 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx whoami` | Shows you, your workspace, your role and the hub. |
 | `line-lx sync` | Writes the newest version of each plugin to Codex and pi, removes the ones gone from the hub, and reports each delivery to the hub. Connects Claude Code to the hub. Exit 1 if a target failed or no agent is found. |
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
+| `line-lx status [--json]` | Shows, for each agent, whether it's connected to the hub, and each plugin it has from the hub: its version, whether it's behind, when it was installed and updated, its skills and hooks. Changes nothing. See [Status](#status). |
 | `line-lx doctor` | Checks the hub, your sign-in and each agent. Exit 1 when something is wrong. |
 | `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Only for Claude Code, which runs it to sign in to the hub. |
 | `line-lx report-usage --agent claude-code --workspace <slug>` | Reports one use of your workspace's plugins to the hub. Only for the hub's Claude Code hook, which gives it the use on stdin. Always exits 0. See [Usage reports](#usage-reports). |
 | `line-lx --version` | Prints the version. |
 
 Agents are used only when found on the machine: Claude Code (`~/.claude` exists, or `claude` is on the PATH), Codex (`~/.codex` exists) and pi (`~/.pi/agent` exists). line-lx only changes folders carrying its stamp, and only for the hub that wrote them.
+
+## Status
+
+`line-lx status` shows what's connected on this machine, one tree per agent:
+
+```
+Hub        https://hub.example.com
+Workspace  Acme (acme)
+
+Claude Code  connected · metro-acme · marketplace fetched 2 h ago
+  PLUGIN           VERSION       STATUS         INSTALLED  UPDATED
+  moqa-kit         1.0.0         behind: 1.1.0  9 d ago    9 d ago
+  └─ skill review  Review a pull request
+  posthog-dev-kit  1.3.0         up to date     18 d ago   8 h ago
+  ├─ skill board-apple-ads  Build and maintain an Apple Ads dashboard that answ…
+  └─ skill capture          Capture an event
+  metro-lx         13cd9935af1d  up to date     6 d ago    6 d ago
+  └─ hook  PostToolUse  line-lx report-usage --agent claude-code --workspace ac…
+  Claude Code catches up with the hub by itself, in its next session.
+
+Codex        set up · ~/.codex/skills · synced 2 d ago
+  PLUGIN           VERSION  STATUS         INSTALLED  UPDATED
+  posthog-dev-kit  1.2.0    behind: 1.3.0  18 d ago   2 d ago
+  └─ skill capture  Capture an event in PostHog
+  Run `line-lx sync` to catch up with the hub.
+
+pi           not found
+```
+
+- **This machine.** For Claude Code, line-lx reads how its settings connect it to the hub (as `doctor` does), then Claude Code's own records: `plugins/known_marketplaces.json` (when it last fetched the marketplace), `plugins/installed_plugins.json` (each plugin's version and scope, when it was installed and last updated) and each plugin's folder in `plugins/cache/<marketplace>/<plugin>/` (its skills, and the hooks in `hooks/hooks.json`). It reads plugin files only inside that cache. A marketplace declared outside the settings files line-lx reads (an MDM profile) counts when Claude Code's records have it from the hub's URL. For Codex and pi, line-lx reads its own stamps and the skill folders it wrote. A stamp has the time of the last write, not of the first.
+- **The hub.** With your sign-in, line-lx asks the hub what it delivered to you (`GET /api/me/installed`): each plugin's latest version, the version it delivered and when, and when Claude Code last fetched the marketplace. The hub's times are yours, on any of your machines. INSTALLED and UPDATED show this machine's times, else the hub's.
+- **States.** `behind`: the version here isn't the hub's latest. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone.
+- **Without the hub.** Not signed in, a sign-in the hub refuses, a hub that doesn't answer, or one too old to have `GET /api/me/installed` (404): line-lx shows what this machine has, and says why.
+- It writes nothing, installs nothing and runs no agent. Like every command, it refreshes an expired sign-in. It never prints the token. It exits 0, unless the configured hub URL isn't valid.
+- The output fits in 80 columns. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`.
+
+### `status --json`
+
+`line-lx status --json` prints the same report as one JSON object, for scripts and IT tooling. `schema` is 1: a change that can break a reader raises it, a new field doesn't. Times are ISO 8601, in UTC. A field line-lx can't tell is `null`, never missing, except the ones marked optional.
+
+| Field | Is |
+|---|---|
+| `schema` | `1` |
+| `hub` | The hub's URL |
+| `workspace` | `{ "slug", "name" }` from the hub, or `null` without its answer |
+| `hubStatus` | `ok`, `not-signed-in`, `sign-in-refused`, `unreachable`, `unsupported` (the hub has no `GET /api/me/installed`) or `error` |
+| `hubMessage` | Optional: why, when `hubStatus` isn't `ok` |
+| `agents[]` | One per agent line-lx knows, always in this order: `claude-code`, `codex`, `pi` |
+| `agents[].target` | `claude-code`, `codex` or `pi` |
+| `agents[].found` | Whether the agent is on this machine. When it isn't, `plugins` is empty. |
+| `agents[].connected` | Claude Code: its settings or its records have the hub's marketplace. Codex and pi: line-lx wrote at least one plugin from this hub. |
+| `agents[].location` | Optional. Claude Code: the settings file that connects it. Codex and pi: the skills folder. |
+| `agents[].problem` | Optional: what's wrong with the connection |
+| `agents[].marketplace` | Optional, Claude Code only: `{ "name", "fetched", "fetchedAt", "hubFetchedAt" }`. `fetched`: Claude Code has the marketplace in its records. `fetchedAt`: when it last fetched it, from its records. `hubFetchedAt`: when the hub last saw Claude Code fetch it, from any of your machines. |
+| `agents[].plugins[]` | What's installed here by name, then what's missing by name, then the bundle |
+| `.name` | The plugin's name |
+| `.bundle` | `true` for Claude Code's `metro-lx`, which brings the workspace's other plugins |
+| `.state` | `up-to-date`, `behind`, `installed` (the hub's latest is unknown), `missing`, `not-in-hub` or `other-hub` |
+| `.version` | The version installed here, `null` when missing |
+| `.latestVersion` | The hub's latest version |
+| `.behind` | `true` when `state` is `behind` |
+| `.from` | Optional: the hub it came from, when it's `other-hub` |
+| `.scope` | Optional, Claude Code only: `user`, `project` or `local`. With several, the `user` one. |
+| `.installedAt`, `.updatedAt` | From this machine's records |
+| `.deliveredVersion`, `.firstDeliveredAt`, `.lastDeliveredAt` | From the hub: what it delivered to you for that agent, and when |
+| `.skills[]` | `{ "name", "description" }`: the skills here, else the hub's |
+| `.hooks[]` | `{ "event", "command" }`: Claude Code's command hooks here, else the hub's |
 
 ## Claude Code
 

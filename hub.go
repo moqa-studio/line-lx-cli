@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,9 +35,14 @@ func (u userAgent) RoundTrip(req *http.Request) (*http.Response, error) {
 // limited caps what line-lx reads from any answer, so a hub can't exhaust memory.
 func limited(body io.Reader) io.Reader { return io.LimitReader(body, 64<<20) }
 
-// clean drops control and format characters (escape sequences, bidi overrides, zero-width) from a string
-// a hub (or `claude`) sent, before it reaches the terminal.
+// escapeSequence is a terminal escape sequence, whole: a CSI (ESC [ or U+009B, its parameters and final
+// byte), an OSC (ESC ], up to BEL or ESC \, or to the end), or ESC with its intermediates and final byte.
+var escapeSequence = regexp.MustCompile("(?:\x1b\\[|\u009b)[0-?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)?|\x1b[ -/]*[0-~]")
+
+// clean drops escape sequences whole, then control and format characters (bidi overrides, zero-width), from
+// a string a hub (or `claude`) sent, before it reaches the terminal.
 func clean(s string) string {
+	s = escapeSequence.ReplaceAllString(s, "")
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
