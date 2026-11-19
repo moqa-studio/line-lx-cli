@@ -67,6 +67,7 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
 | `line-lx doctor` | Checks the hub, your sign-in and each agent. Exit 1 when something is wrong. |
 | `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Only for Claude Code, which runs it to sign in to the hub. |
+| `line-lx report-usage --agent claude-code --workspace <slug>` | Reports one use of your workspace's plugins to the hub. Only for the hub's Claude Code hook, which gives it the use on stdin. Always exits 0. See [Usage reports](#usage-reports). |
 | `line-lx --version` | Prints the version. |
 
 Agents are used only when found on the machine: Claude Code (`~/.claude` exists, or `claude` is on the PATH), Codex (`~/.codex` exists) and pi (`~/.pi/agent` exists). line-lx only changes folders carrying its stamp, and only for the hub that wrote them.
@@ -101,6 +102,24 @@ Admins can connect Claude Code on every machine with [managed settings](https://
 
 `<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx. Claude Code doesn't install the dependencies of `metro-lx` when it starts, so list each plugin in `enabledPlugins` too (`"<plugin>@metro-<slug>": true`), or have people run `line-lx sync`. `line-lx doctor` and `line-lx list` see a marketplace declared in Claude Code's managed settings files (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux), not one from an MDM profile or server-managed settings.
 
+### Usage reports
+
+When an admin turns on agent reporting for the workspace, the hub's `metro-lx` plugin carries a Claude Code hook. It runs `line-lx report-usage --agent claude-code --workspace <slug>` in the background each time Claude runs a skill or an MCP tool of a plugin, and each time you type a skill. While reporting is off, the plugin has no hook and nothing is sent.
+
+A report says only which plugin and version, which skill or MCP tool, the kind of use (`activated`, `mcp_call` or `failed`), who started it (`person` or `agent`) and whether it succeeded:
+
+```json
+{"workspace":"<slug>","agent":"claude-code","kind":"activated","plugin":"<plugin>","version":"<version>","name":"<skill>","trigger":"agent","success":true}
+```
+
+- line-lx sends a name only when it belongs to a plugin Claude Code installed from the workspace's marketplace, `metro-<slug>`, and only when that marketplace comes from the current hub. It reads this from Claude Code's own records, `plugins/known_marketplaces.json` and `plugins/installed_plugins.json` in Claude Code's folder, and the plugin's folder in `plugins/cache/metro-<slug>/<plugin>/`. The version is the one in that folder's `.claude-plugin/plugin.json`, else the folder's name when it looks like a version (Claude Code names some folders with a hash instead). A skill of your own, a project's skill or a plugin from another marketplace is never sent.
+- A skill named with its plugin, `<plugin>:<skill>`, always counts. Claude Code runs a plugin's skill under its bare name, `<skill>`, only when no other skill or command has that name, so line-lx sends a bare name only when the workspace's plugin is the one place that has it. It looks in the managed policy folder, Claude Code's folder (your skills, commands and skills-directory plugins), the `.claude` folder of the current folder, of the session's project and of every folder above them, every `.claude` folder inside the project, the folders in `permissions.additionalDirectories` of the settings files, and every installed plugin. The current folder is only read on this machine, never sent. When line-lx can't read one of these places, when the session runs at `/` or in your home folder, or when the project is too large to look through in time (over 20,000 folders, or over a second), it sends nothing for a bare name. Names with their plugin still count there.
+- A folder added for one session with `/add-dir` or `--add-dir` isn't recorded anywhere, so a skill there with the same name can make line-lx count the workspace's skill by mistake; the name sent is still the workspace skill's own, which the hub already knows.
+- Nothing is sent when line-lx can't tell which copy ran: the plugin is also installed from another marketplace, or Claude Code holds two versions of it.
+- Commands, arguments, prompts, folders, paths and session identifiers are never sent. The hub takes who you are from your sign-in, and counts a use only under a version it delivered to you.
+- The report goes to `<hub>/api/usage/reports` with your sign-in, once. line-lx ends within 3 seconds, reading its input included, never retries, prints nothing on stdout and always exits 0, so a report never slows Claude Code or fails a tool.
+- A report the hub didn't take is dropped and counted. `line-lx doctor` shows how many since when, until a report reaches the hub again.
+
 Two environment variables, for CI and managed machines:
 
 - `LINE_LX_HUB`: the hub's URL, `https://host[/path]` (`http` only for localhost). Without it, line-lx uses the hub saved by `--hub`, else the Metro-LX cloud hub.
@@ -109,7 +128,7 @@ Two environment variables, for CI and managed machines:
 ## Where it stores things
 
 - **Sign-in**: tokens for the hub's API (resource `<hub>/api`), in the OS keychain, service `line-lx`, one entry per hub URL. On macOS, any process running as you can read this item. On Linux without a Secret Service on D-Bus (SSH boxes, containers), the sign-in goes to `<config dir>/line-lx/credentials/<hub id>.json`, mode 0600 in a 0700 folder.
-- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json` and the sync lock in `sync.lock`. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
+- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json`, the sync lock in `sync.lock`, and, after a usage report was dropped, `usage-dropped.json`: a count and the time of the first drop, nothing else. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
 - **Plugins**: Codex in `~/.codex/skills/<plugin>--<skill>/`, with records in `~/.codex/skills/.line-lx/`. pi in `~/.pi/agent/skills/<plugin>/<skill>/`. Claude Code keeps its own, installed from the hub's marketplace (see [Claude Code](#claude-code)).
 
 ## Build from source

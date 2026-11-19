@@ -411,6 +411,10 @@ func runDoctor() error {
 				fmt.Printf("     %-12s Claude Code %s\n", "", version)
 			}
 		}
+		// A warning: the next report that reaches the hub clears it.
+		if msg := droppedText(readDropped()); msg != "" {
+			fmt.Printf("warn %-12s %s\n", "", msg)
+		}
 	}
 	if !found {
 		check("agents", false, "none found: install Codex, pi or Claude Code")
