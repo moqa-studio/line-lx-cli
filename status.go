@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -637,20 +638,71 @@ func ago(t *time.Time, now time.Time) string {
 	return fmt.Sprintf("%d d ago", d/(24*time.Hour))
 }
 
-// fit cuts s to n characters, the last one an ellipsis when it was longer.
+// fit cuts s to n columns, the last one an ellipsis when it was longer.
 func fit(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
+	if cols(s) <= n {
 		return s
 	}
 	if n < 1 {
 		return ""
 	}
-	return string([]rune(s)[:n-1]) + "…"
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		w := runeCols(r)
+		if used+w > n-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String() + "…"
 }
 
-// pad fills s with spaces to n characters (fmt's %-*s counts bytes, not characters).
+// pad fills s with spaces to n columns (fmt's %-*s counts bytes, not columns).
 func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-utf8.RuneCountInString(s)))
+	return s + strings.Repeat(" ", max(0, n-cols(s)))
+}
+
+// cols is how many columns s takes in a terminal: a wide character (CJK, most emoji) two, a combining mark none.
+func cols(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeCols(r)
+	}
+	return n
+}
+
+func runeCols(r rune) int {
+	switch {
+	case unicode.In(r, unicode.Mn, unicode.Me):
+		return 0
+	case wide(r):
+		return 2
+	}
+	return 1
+}
+
+// wide is true for the East Asian wide and fullwidth blocks, and the emoji shown wide.
+func wide(r rune) bool {
+	switch {
+	case r < 0x1100:
+		return false
+	case r <= 0x115F, // Hangul Jamo
+		0x2E80 <= r && r <= 0x303E,                             // CJK radicals, symbols and punctuation
+		0x3041 <= r && r <= 0x33FF,                             // kana, CJK compatibility
+		0x3400 <= r && r <= 0x4DBF, 0x4E00 <= r && r <= 0x9FFF, // CJK ideographs
+		0xA000 <= r && r <= 0xA4CF,                             // Yi
+		0xAC00 <= r && r <= 0xD7A3,                             // Hangul syllables
+		0xF900 <= r && r <= 0xFAFF,                             // CJK compatibility ideographs
+		0xFE30 <= r && r <= 0xFE4F,                             // CJK compatibility forms
+		0xFF00 <= r && r <= 0xFF60, 0xFFE0 <= r && r <= 0xFFE6, // fullwidth forms
+		0x1F300 <= r && r <= 0x1F64F, 0x1F680 <= r && r <= 0x1F6FF, 0x1F900 <= r && r <= 0x1F9FF, // emoji
+		0x1FA70 <= r && r <= 0x1FAFF,
+		0x20000 <= r && r <= 0x3FFFD: // CJK extensions
+		return true
+	}
+	return false
 }
 
 // tilde writes a path under the home folder as ~/….
@@ -790,8 +842,8 @@ func renderAgent(w io.Writer, a statusAgent, now time.Time, c painter) {
 			r.installed, r.updated = ago(firstOf(p.InstalledAt, p.FirstDeliveredAt), now), ago(firstOf(p.UpdatedAt, p.LastDeliveredAt), now)
 		}
 		rows[i] = r
-		wn, wv = max(wn, utf8.RuneCountInString(r.name)), max(wv, utf8.RuneCountInString(r.version))
-		ws, wi = max(ws, utf8.RuneCountInString(r.status)), max(wi, utf8.RuneCountInString(r.installed))
+		wn, wv = max(wn, cols(r.name)), max(wv, cols(r.version))
+		ws, wi = max(ws, cols(r.status)), max(wi, cols(r.installed))
 	}
 	line := func(r row, color func(string) string) string {
 		return "  " + pad(r.name, wn) + "  " + pad(r.version, wv) + "  " + color(pad(r.status, ws)) + "  " + pad(r.installed, wi) + "  " + r.updated
@@ -844,7 +896,7 @@ func renderChildren(w io.Writer, p statusPlugin, c painter) {
 	const kindWidth = 11 // "  ├─ skill "
 	wn := 0
 	for _, ch := range children {
-		if n := utf8.RuneCountInString(ch.name); ch.text != "" && kindWidth+n+2+descriptionRoom <= statusWidth {
+		if n := cols(ch.name); ch.text != "" && kindWidth+n+2+descriptionRoom <= statusWidth {
 			wn = max(wn, n)
 		}
 	}
@@ -859,13 +911,13 @@ func renderChildren(w io.Writer, p statusPlugin, c painter) {
 			continue
 		}
 		head += pad(ch.name, wn) + "  "
-		if room := statusWidth - utf8.RuneCountInString(head); room >= descriptionRoom {
+		if room := statusWidth - cols(head); room >= descriptionRoom {
 			fmt.Fprintln(w, c.dim(head)+c.dim(fit(ch.text, room)))
 			continue
 		}
 		fmt.Fprintln(w, c.dim(strings.TrimRight(head, " ")))
 		indent := "  " + under + "      "
-		fmt.Fprintln(w, c.dim(indent+fit(ch.text, statusWidth-utf8.RuneCountInString(indent))))
+		fmt.Fprintln(w, c.dim(indent+fit(ch.text, statusWidth-cols(indent))))
 	}
 }
 

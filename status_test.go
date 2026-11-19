@@ -340,8 +340,25 @@ func TestRenderStatus(t *testing.T) {
 		t.Errorf("status:\n%s\nwant:\n%s", b.String(), want)
 	}
 	for i, line := range strings.Split(b.String(), "\n") {
-		if n := len([]rune(line)); n > statusWidth {
-			t.Errorf("line %d is %d characters wide: %q", i+1, n, line)
+		if n := cols(line); n > statusWidth {
+			t.Errorf("line %d is %d columns wide: %q", i+1, n, line)
+		}
+	}
+}
+
+// TestStatusFitsInColumns: a description is cut by the columns it takes in a terminal, not by its characters: a
+// wide character (CJK, emoji) takes two, a combining accent none.
+func TestStatusFitsInColumns(t *testing.T) {
+	p := statusPlugin{Name: "notes", Skills: []statusSkill{
+		{"helper", "Formats release notes 📝 for the team in a consistent style, every week, with care"},
+		{"g-inject", "リリースノートをチームのために一貫したスタイルで整形します。毎週、丁寧に。"},
+		{"accents", "Re\u0301sume\u0301 des notes de version pour l'e\u0301quipe, chaque semaine, avec soin et style"},
+	}}
+	var b strings.Builder
+	renderChildren(&b, p, false)
+	for _, line := range strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n") {
+		if n := cols(line); n > statusWidth || n < statusWidth-1 {
+			t.Errorf("%d columns, want %d (or %d when a wide character doesn't fit): %q", n, statusWidth, statusWidth-1, line)
 		}
 	}
 }
