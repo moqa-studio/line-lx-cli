@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-19
+
 ### Added
 
 - `report-usage --agent claude-code --workspace <slug>` reports one use of the workspace's plugins to the hub: the plugin and the version Claude Code installed, the skill or MCP tool, the kind of use, who started it and whether it succeeded. The hub's Claude Code hook runs it while the workspace's agent reporting is on. It sends a name only when it belongs to a plugin Claude Code installed from the workspace's marketplace on the current hub, and a bare skill name only when no other skill or command Claude Code can find has it. It never sends commands, arguments, prompts, paths or session identifiers. It ends within 3 seconds, never retries, and always exits 0.
@@ -61,7 +63,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.0...v0.1.1
