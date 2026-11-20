@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
 ### Added
 
 - `status` shows what's connected on this machine. For Claude Code, Codex and pi: whether the agent is connected to the hub, and each plugin it has from the hub, with its version, whether it's behind the hub's latest, when it was installed and last updated, its skills, and its hooks (the usage hook of Claude Code's `metro-lx`). For Claude Code, it also shows when it last fetched the marketplace. It reads Claude Code's own records, `installed_plugins.json` and `known_marketplaces.json`, and line-lx's stamps, then compares them with the hub's `GET /api/me/installed`. Without a sign-in, or without an answer from the hub, it shows what this machine has, and says why. It changes nothing. Names and versions are never cut, a bundle's 12-character version included; only descriptions are, by the columns they take, so a line with Chinese or emoji fits in 80 columns too. `--json` prints the same report in a stable format, documented in the README.
@@ -71,7 +73,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.1...v0.1.2
