@@ -208,7 +208,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if enabled := s["enabledPlugins"]; !reflect.DeepEqual(enabled, wantEnabled) {
 		t.Errorf("enabledPlugins = %v\nwant %v", enabled, wantEnabled)
 	}
-	if !strings.Contains(out, `claude-code  skipped the plugin "Bad Name[31m": line-lx refuses its name`+"\n") {
+	if !strings.Contains(out, `claude-code  skipped the plugin "Bad Name": line-lx refuses its name`+"\n") {
 		t.Errorf("the refused name isn't shown, or not sanitized:\n%q", out)
 	}
 	if !strings.Contains(read(t, settings), `"command": "a && b <c>"`) {

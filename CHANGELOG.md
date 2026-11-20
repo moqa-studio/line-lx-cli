@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `status` shows what's connected on this machine. For Claude Code, Codex and pi: whether the agent is connected to the hub, and each plugin it has from the hub, with its version, whether it's behind the hub's latest, when it was installed and last updated, its skills, and its hooks (the usage hook of Claude Code's `metro-lx`). For Claude Code, it also shows when it last fetched the marketplace. It reads Claude Code's own records, `installed_plugins.json` and `known_marketplaces.json`, and line-lx's stamps, then compares them with the hub's `GET /api/me/installed`. Without a sign-in, or without an answer from the hub, it shows what this machine has, and says why. It changes nothing. Names and versions are never cut, a bundle's 12-character version included; only descriptions are, by the columns they take, so a line with Chinese or emoji fits in 80 columns too. `--json` prints the same report in a stable format, documented in the README.
+
+### Fixed
+
+- Text from the hub or `claude` loses its terminal escape sequences whole (CSI, OSC and the others) before line-lx prints it. Before, only the escape character went, and the rest of a sequence, such as `[31m`, was printed.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

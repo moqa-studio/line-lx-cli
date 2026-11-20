@@ -63,6 +63,15 @@ func main() {
 	reportUsage.Flags().StringVar(&agentFlag, "agent", "", "the agent that ran it: claude-code")
 	reportUsage.Flags().StringVar(&workspaceFlag, "workspace", "", "the workspace's slug")
 
+	var jsonFlag bool
+	status := &cobra.Command{
+		Use:   "status",
+		Short: "Show what each agent here has from the hub, and whether it's behind",
+		Args:  cobra.NoArgs,
+		RunE:  func(*cobra.Command, []string) error { return runStatus(jsonFlag) },
+	}
+	status.Flags().BoolVar(&jsonFlag, "json", false, "print it as JSON, in the format the README documents")
+
 	root.AddCommand(
 		setup,
 		login,
@@ -74,6 +83,7 @@ func main() {
 			RunE: func(*cobra.Command, []string) error { return runSync() }},
 		&cobra.Command{Use: "list", Short: "List the plugins installed here, per agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runList() }},
+		status,
 		&cobra.Command{Use: "doctor", Short: "Check the Metro-LX hub, your sign-in and each agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runDoctor() }},
 		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,

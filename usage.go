@@ -285,7 +285,10 @@ func skillIn(dir, plugin, name string) (string, bool) {
 }
 
 // frontmatterName is the `name:` of a SKILL.md's frontmatter, or "".
-func frontmatterName(path string) string {
+func frontmatterName(path string) string { return frontmatterValue(path, "name") }
+
+// frontmatterValue is a `key:` of a SKILL.md's frontmatter as written on its line, or "".
+func frontmatterValue(path, key string) string {
 	f, err := openRegular(path)
 	if err != nil {
 		return ""
@@ -300,7 +303,7 @@ func frontmatterName(path string) string {
 		if strings.TrimSpace(line) == "---" {
 			return ""
 		}
-		if v, ok := strings.CutPrefix(line, "name:"); ok {
+		if v, ok := strings.CutPrefix(line, key+":"); ok {
 			return strings.Trim(strings.TrimSpace(v), `"'`)
 		}
 	}
