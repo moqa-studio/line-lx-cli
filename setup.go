@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 )
 
 // runSetup is the one command a person or their agent runs: sign in if needed, sync, then
@@ -16,25 +15,29 @@ func runSetup(hubFlag string) error {
 	if err != nil {
 		return err
 	}
+	c := colorDepth(os.Stdout)
+	writeHeader(os.Stdout, c, []seg{plain("setup")}, nil)
+	fmt.Println()
 	api, m, err := signedIn(hub)
 	if err != nil {
 		return err
 	}
 	results, err := syncAll(api)
 	if errors.Is(err, errNoAgent) {
-		fmt.Print("\nNo agent found on this machine. line-lx connects Claude Code (~/.claude or `claude` on PATH) " +
-			"and writes plugins for Codex (~/.codex) and pi (~/.pi/agent): install one, then run `line-lx setup` again.\n")
+		fmt.Println()
+		printLines(paragraph(2, plain("No agent found on this machine. line-lx connects Claude Code (~/.claude or `claude` on PATH) "+
+			"and writes plugins for Codex (~/.codex) and pi (~/.pi/agent): install one, then run `line-lx setup` again.")))
 		if mcp := clean(m.Endpoints.MCP); mcp != "" {
-			fmt.Printf("Claude, ChatGPT and other MCP clients connect to the MCP server instead: %s\n", mcp)
+			printLines(paragraph(2, seg{"Claude, ChatGPT and other MCP clients connect to the MCP server instead: " + mcp, c.dim}))
 		} else {
-			fmt.Println("Claude, ChatGPT and other MCP clients connect to the hub's MCP server instead.")
+			printLines(paragraph(2, seg{"Claude, ChatGPT and other MCP clients connect to the hub's MCP server instead.", c.dim}))
 		}
 		return nil
 	}
 	if results == nil {
 		return err
 	}
-	fmt.Print("\n" + setupSummary(hub, results))
+	printLines(paragraph(2, seg{"Run `line-lx sync` for new versions, and `line-lx doctor` to check this machine.", c.dim}))
 	return err
 }
 
@@ -50,7 +53,7 @@ func signedIn(hub string) (*hubClient, *me, error) {
 			if err := saveHub(hub); err != nil {
 				return nil, nil, fmt.Errorf("Can't save the hub in the config: %v", err)
 			}
-			fmt.Printf("Signed in as %s %s · workspace %s · %s\n", clean(m.User.Name), clean(m.User.Email), clean(m.Org.Name), hub)
+			printLines(signInRow(&m, hub, colorDepth(os.Stdout)))
 			return api, &m, nil
 		}
 	}
@@ -71,55 +74,17 @@ func signedIn(hub string) (*hubClient, *me, error) {
 	return &hubClient{hub: hub, token: token}, m, nil
 }
 
-// setupSummary is one line per agent: what it has from the hub, and the next step when something changed.
-func setupSummary(hub string, results []*agentResult) string {
-	home, _ := os.UserHomeDir()
-	var b strings.Builder
-	fmt.Fprintf(&b, "line-lx is set up for %s:\n", hub)
-	for _, r := range results {
-		var msg string
-		n := r.delivered + r.current
-		switch {
-		case r.skipped != "":
-			msg = "nothing installed: " + r.skipped + "."
-		case r.name == claudeTarget:
-			// Claude Code gets the plugins by itself: what line-lx did is connecting it, or failing to.
-			msg = r.connected
-			if r.failed > 0 {
-				msg = "not connected: see above, or run `line-lx doctor`."
-			} else if r.warning != "" {
-				msg += " " + r.warning + "."
-			}
-			fmt.Fprintf(&b, "  %-12s %s\n", agentName(r.name), msg)
-			continue
-		default:
-			where := r.where
-			if home != "" && strings.HasPrefix(where, home+string(os.PathSeparator)) {
-				where = "~" + where[len(home):]
-			}
-			msg = fmt.Sprintf("%s in %s.", plural(n, "plugin"), where)
-		}
-		switch {
-		case r.failed > 0:
-			msg += fmt.Sprintf(" %d failed: see above, or run `line-lx doctor`.", r.failed)
-		case r.skipped == "" && r.delivered == 0 && r.removed == 0:
-			msg += " Nothing new."
-		}
-		if r.delivered > 0 || r.removed > 0 {
-			msg += " " + nextStep(r.name)
-		}
-		fmt.Fprintf(&b, "  %-12s %s\n", agentName(r.name), msg)
-	}
-	b.WriteString("Run `line-lx sync` to get new versions, and `line-lx doctor` to check this machine.\n")
-	return b.String()
-}
-
+// agentName is an agent's name for people, as the web app writes it; an agent line-lx doesn't know keeps its id.
 func agentName(target string) string {
 	switch target {
 	case claudeTarget:
 		return "Claude Code"
 	case "codex":
 		return "Codex"
+	case "claude":
+		return "Claude"
+	case "mcp":
+		return "MCP server"
 	}
 	return target
 }
@@ -128,9 +93,9 @@ func agentName(target string) string {
 func nextStep(target string) string {
 	switch target {
 	case "pi":
-		return "Next: restart pi."
+		return "Restart pi to load them."
 	case "codex":
-		return "Next: start a new Codex session."
+		return "Start a new Codex session to load them."
 	}
 	return ""
 }

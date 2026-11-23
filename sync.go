@@ -3,24 +3,36 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 const claudeTarget = "claude-code"
 
 var errNoAgent = errors.New("No agent found on this machine (looked for ~/.codex, ~/.pi/agent, and ~/.claude or `claude` on PATH).")
 
-// agentResult is what a sync did for one agent, for `line-lx setup`'s summary.
+// agentResult is what a sync did for one agent.
 type agentResult struct {
 	name, where                string
 	delivered, current, failed int
-	removed                    int    // plugins line-lx took out of the agent
-	connected                  string // Claude Code: what connecting it did
-	warning                    string // Claude Code: what the person should do, when its version is too old
-	skipped                    string // why the agent got nothing, when sync skipped it
+	removed                    int              // plugins line-lx took out of the agent
+	changes                    []pluginChange   // Codex and pi: what changed, plugin by plugin
+	claude                     *claudeConnected // Claude Code: what connecting it did
+	outdated                   string           // Claude Code: its version, when it's older than minClaudeVersion
+	skipped                    string           // why the agent got nothing, when sync skipped it
+	err                        string           // why the agent failed as a whole
+}
+
+// pluginChange is one plugin line-lx wrote to an agent, or took out of it.
+type pluginChange struct {
+	name, version string
+	from          string // the version it replaced; "" when the agent didn't have it
+	action        string // added, updated, removed or failed
+	detail        string // why it failed, or what the agent couldn't take
 }
 
 func runSync() error {
@@ -28,14 +40,24 @@ func runSync() error {
 	if err != nil {
 		return err
 	}
+	// The workspace's name, for the header: without it, the header has none.
+	title := []seg{plain("sync")}
+	var m me
+	if api.do("GET", "/api/me", nil, &m) == nil && clean(m.Org.Name) != "" {
+		title = []seg{plain("sync · " + clean(m.Org.Name))}
+	}
+	writeHeader(os.Stdout, colorDepth(os.Stdout), title, nil)
+	fmt.Println()
 	_, err = syncAll(api)
 	return err
 }
 
-// syncAll writes the hub's plugins to every agent found here and reports each delivery to the hub, and
-// connects Claude Code to the hub, which then gets the plugins by itself. It returns errNoAgent when
-// there's no agent, and errSilent when a target failed (the details are printed).
+// syncAll connects Claude Code to the hub, which then gets the plugins by itself, writes the hub's plugins to Codex
+// and pi, and reports each delivery to the hub. It prints a row per agent as it goes, with a spinner on a terminal. It
+// returns errNoAgent when there's no agent, and errSilent when a target failed (the details are printed).
 func syncAll(api *hubClient) ([]*agentResult, error) {
+	start := time.Now()
+	c := colorDepth(os.Stdout)
 	unlock, err := syncLock()
 	if err != nil {
 		return nil, err
@@ -46,146 +68,231 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 		return nil, err
 	}
 	if len(rels) == 0 {
-		fmt.Println("Your workspace has no published plugins yet.")
+		printLines(paragraph(2, seg{"Your workspace has no published plugins yet.", c.dim}))
+		fmt.Println()
 	}
-
-	label := func(name, version string) string { return clean(name + " " + version) }
-	width := 0
-	for _, r := range rels {
-		width = max(width, len(label(r.name, r.version.Version)))
-	}
-	for _, t := range fileTargets() { // plugins about to be removed are printed too
-		for name, s := range t.stamps() {
-			width = max(width, len(label(name, s.Version)))
-		}
-	}
-	line := func(what, target, msg string) { fmt.Printf("%-*s  → %-12s %s\n", width, what, target, msg) }
-	home, _ := os.UserHomeDir()
+	// The plugins' lines, for their badges: a hub that doesn't say leaves them out.
+	lines := askInstalled(api).lines
 
 	var results []*agentResult
-	var written, upToDate, failed, reported int
+	var failed int
 	var reportErr error
-	// deliver prints the outcome of one plugin × target and reports it to the hub.
-	deliver := func(res *agentResult, r release, unsupported []string, werr error) {
-		target := res.name
-		status, msg, errMsg := "delivered", "written", ""
-		switch {
-		case werr != nil:
-			// The hub gets paths relative to the home folder, not this machine's layout.
-			errMsg = werr.Error()
-			if home != "" {
-				errMsg = strings.ReplaceAll(errMsg, home, "~")
-			}
-			status, msg = "failed", "failed: "+werr.Error()
-			failed++
-			res.failed++
-		case len(unsupported) > 0:
-			status, msg = "partial", "written, skipped: "+strings.Join(unsupported, "; ")
-			written++
-			res.delivered++
-		default:
-			written++
-			res.delivered++
-		}
-		line(label(r.name, r.version.Version), target, msg)
-		if err := api.report(r.version.ID, target, status, unsupported, errMsg); err != nil {
-			reportErr = err
-		} else {
-			reported++
-		}
+	show := func(res *agentResult) {
+		results = append(results, res)
+		failed += res.failed
+		printLines(syncRows(res, lines, c))
 	}
-	current := func(res *agentResult, r release) {
-		line(label(r.name, r.version.Version), res.name, "up to date")
-		upToDate++
-		res.current++
+	away := func(target string) { printLines(checkRow(c, checkNone, agentName(target), seg{"not found", c.dim})) }
+
+	// Claude Code: line-lx writes no plugin, it connects Claude Code to the hub. Nothing is reported to the
+	// hub: Claude Code fetches the plugins itself.
+	if claudeDetected() {
+		s := spin(os.Stdout, c, c != noColor, agentName(claudeTarget))
+		s.say("connecting to the hub")
+		res := &agentResult{name: claudeTarget}
+		done, err := claudeConnect(api)
+		switch {
+		case claudeSkipped(err):
+			res.skipped = err.Error()
+		case err != nil:
+			res.err, res.failed = err.Error(), 1
+		default:
+			res.claude, res.outdated = &done, claudeOutdated()
+		}
+		s.stop()
+		show(res)
+	} else {
+		away(claudeTarget)
 	}
 
 	inHub := map[string]bool{}
 	for _, r := range rels {
 		inHub[r.name] = true
 	}
-
+	home, _ := os.UserHomeDir()
 	for _, t := range fileTargets() {
 		if !t.detected() {
+			away(t.name)
 			continue
 		}
 		res := &agentResult{name: t.name, where: t.dir}
-		results = append(results, res)
+		s := spin(os.Stdout, c, c != noColor, agentName(t.name))
 		if err := t.sweepStaging(); err != nil { // leftovers of an interrupted sync
-			line("", t.name, "failed: "+err.Error())
-			failed++
-			res.failed++
+			res.err, res.failed = err.Error(), 1
+			s.stop()
+			show(res)
 			continue
 		}
 		stamps := t.stamps()
 		for _, r := range rels {
-			if s, ok := stamps[r.name]; ok && s.Hub == api.hub && s.VersionID == r.version.ID {
-				current(res, r)
+			before, had := stamps[r.name]
+			if had && before.Hub == api.hub && before.VersionID == r.version.ID {
+				res.current++
 				continue
 			}
-			unsupported, err := t.write(api.hub, r)
-			deliver(res, r, unsupported, err)
+			s.say("writing " + clean(r.name) + " v" + clean(r.version.Version))
+			unsupported, werr := t.write(api.hub, r)
+			ch := pluginChange{name: clean(r.name), version: clean(r.version.Version), action: "added"}
+			if had && before.Hub == api.hub {
+				ch.action, ch.from = "updated", clean(before.Version)
+			}
+			status, errMsg := "delivered", ""
+			switch {
+			case werr != nil:
+				// The hub gets paths relative to the home folder, not this machine's layout.
+				errMsg = werr.Error()
+				if home != "" {
+					errMsg = strings.ReplaceAll(errMsg, home, "~")
+				}
+				status, ch.action, ch.detail = "failed", "failed", werr.Error()
+				res.failed++
+			case len(unsupported) > 0:
+				status, ch.detail = "partial", "skipped "+strings.Join(unsupported, "; ")
+				res.delivered++
+			default:
+				res.delivered++
+			}
+			res.changes = append(res.changes, ch)
+			if err := api.report(r.version.ID, t.name, status, unsupported, errMsg); err != nil {
+				reportErr = err
+			}
 		}
 		// Plugins this hub no longer has: only folders carrying our stamp, and only this hub's.
 		for _, name := range sortedKeys(stamps) {
-			s := stamps[name]
-			if s.Hub != api.hub || inHub[name] {
+			st := stamps[name]
+			if st.Hub != api.hub || inHub[name] {
 				continue
 			}
-			if err := t.remove(name, s); err != nil {
-				line(label(name, s.Version), t.name, "failed to remove: "+err.Error())
-				failed++
+			s.say("removing " + name)
+			ch := pluginChange{name: name, version: clean(st.Version), action: "removed"}
+			if err := t.remove(name, st); err != nil {
+				ch.action, ch.detail = "failed", "can't remove it: "+err.Error()
 				res.failed++
 			} else {
-				line(label(name, s.Version), t.name, "removed (not in the hub anymore)")
 				res.removed++
 			}
+			res.changes = append(res.changes, ch)
 		}
 		_ = t.sweepStaging() // nothing left behind once this target is done
-	}
-
-	// Claude Code: line-lx writes no plugin, it connects Claude Code to the hub. Nothing is reported to the
-	// hub: Claude Code fetches the plugins itself.
-	if claudeDetected() {
-		res := &agentResult{name: claudeTarget}
-		results = append(results, res)
-		msg, err := claudeConnect(api)
-		if err == nil {
-			res.warning = claudeOutdated()
-		}
-		switch {
-		case claudeSkipped(err):
-			res.skipped = err.Error()
-			fmt.Printf("%-12s skipped: %v.\n", claudeTarget, err)
-		case err != nil:
-			fmt.Printf("%-12s failed: %v\n", claudeTarget, err)
-			failed++
-			res.failed++
-		default:
-			res.connected = msg
-			fmt.Printf("%-12s %s\n", claudeTarget, msg)
-			if res.warning != "" {
-				fmt.Printf("%-12s warning: %s.\n", claudeTarget, res.warning)
-			}
-		}
+		s.stop()
+		show(res)
 	}
 
 	if len(results) == 0 {
 		return nil, errNoAgent
 	}
-
-	summary := fmt.Sprintf("%d written, %d up to date, %d failed.", written, upToDate, failed)
-	switch {
-	case reportErr != nil:
-		summary += " Couldn't report every delivery to the hub: " + reportErr.Error()
-	case reported > 0:
-		summary += " Reported to the hub."
+	if reportErr != nil {
+		printLines(checkRow(c, checkFail, "Hub", plain("Couldn't report every delivery to the hub: "+reportErr.Error())))
 	}
-	fmt.Println(summary)
+	fmt.Println()
+	fmt.Println(doneRow(failed, time.Since(start), c))
 	if failed > 0 || reportErr != nil {
 		return results, errSilent{}
 	}
 	return results, nil
+}
+
+// syncRows is what a sync did for one agent, for people: its check row, the plugins it changed, and the next step.
+func syncRows(r *agentResult, lines map[string]string, c painter) []string {
+	name := agentName(r.name)
+	var out []string
+	add := func(rows []string) { out = append(out, rows...) }
+	switch {
+	case r.skipped != "":
+		add(checkRow(c, checkNone, name, plain("skipped: "+r.skipped+".")))
+	case r.err != "":
+		add(checkRow(c, checkFail, name, plain(r.err)))
+	case r.claude != nil:
+		how := "it gets the plugins from its next start"
+		if r.claude.now {
+			how = "it installs new versions itself"
+		}
+		add(checkRow(c, checkOK, name, plain("connected"), seg{" · " + how, c.dim}))
+		if r.claude.reload {
+			add(fixRow(c, checkCol, "Run /reload-plugins in Claude Code, or restart it."))
+		}
+		if r.claude.comeBack {
+			add(noteRow(c, checkCol, "The plugins line-lx installed before come back when Claude Code starts again."))
+		}
+		if len(r.claude.pending) > 0 {
+			add(noteRow(c, checkCol, fmt.Sprintf("It installs %s at its next start instead (%v).", strings.Join(r.claude.pending, ", "), r.claude.pendingErr)))
+		}
+		for _, p := range r.claude.refused {
+			add(noteRow(c, checkCol, fmt.Sprintf("Skipped the plugin %q: line-lx refuses its name.", p)))
+		}
+	default:
+		kind, detail := checkOK, []seg{plain(plural(r.delivered+r.current, "plugin")), {" · " + tilde(r.where), c.dim}}
+		if r.failed > 0 {
+			kind = checkFail
+		}
+		if len(r.changes) == 0 {
+			detail = append(detail, seg{" · nothing new", c.dim})
+		}
+		add(checkRow(c, kind, name, detail...))
+		add(changeRows(r.changes, lines, c))
+		if next := nextStep(r.name); next != "" && r.delivered+r.removed > 0 {
+			add(fixRow(c, checkCol, next))
+		}
+	}
+	if r.outdated != "" {
+		add(checkRow(c, checkWarn, name, plain(outdatedText(r.outdated))))
+		add(fixRow(c, checkCol, claudeUpdate))
+	}
+	return out
+}
+
+// changeRows are the plugins a sync changed in an agent, under its row: each with its line's badge, its version,
+// and what happened to it.
+func changeRows(changes []pluginChange, lines map[string]string, c painter) []string {
+	badges := false
+	for _, ch := range changes {
+		_, ok := lines[ch.name]
+		badges = badges || ok
+	}
+	at := checkCol
+	if badges {
+		at += 5
+	}
+	var names, versions int
+	for _, ch := range changes {
+		names, versions = max(names, cols(ch.name)), max(versions, cols("v"+ch.version))
+	}
+	version := at + max(18, names+2)
+	action := version + versions + 3
+	var out []string
+	for _, ch := range changes {
+		r := new(row)
+		if badges {
+			r.at(checkCol, c.badge(lines[ch.name], false))
+		}
+		r.at(at, seg{ch.name, c.bold}).at(version, plain("v"+ch.version))
+		switch {
+		case ch.action == "added":
+			r.at(action, seg{"added", c.green})
+		case ch.action == "updated" && ch.from != "" && ch.from != ch.version:
+			r.at(action, plain("updated"), seg{" from v" + ch.from, c.dim})
+		case ch.action == "removed":
+			r.at(action, plain("removed"), seg{" · not in the hub anymore", c.dim})
+		case ch.action == "failed":
+			r.at(action, seg{"failed", c.red})
+		default:
+			r.at(action, plain(ch.action))
+		}
+		out = append(out, r.String())
+		if ch.detail != "" {
+			out = append(out, noteRow(c, at, ch.detail)...)
+		}
+	}
+	return out
+}
+
+// doneRow ends a sync: how long it took, and how many deliveries failed.
+func doneRow(failed int, took time.Duration, c painter) string {
+	done := fmt.Sprintf("Done in %.1fs.", took.Seconds())
+	if failed == 0 {
+		return new(row).at(2, plain(done)).String()
+	}
+	return new(row).at(2, seg{fmt.Sprintf("%d failed.", failed), c.red}, plain(" "+done)).String()
 }
 
 // installedPlugin is what a target has for one plugin; versionID is empty for Claude Code.
@@ -240,47 +347,90 @@ func runList() error {
 	if err != nil {
 		return err
 	}
+	c := colorDepth(os.Stdout)
+	writeHeader(os.Stdout, c, []seg{plain("list")}, nil)
 	var rels map[string]release
 	api, err := newHubClient()
 	if err == nil {
 		rels, err = hubReleases(api)
 	}
 	if err != nil {
-		fmt.Printf("The hub didn't answer, so this is only what's installed. (%v)\n", err)
+		// Why there's nothing to compare with, in status's words: the error itself when it tells more.
+		why := statusReport{HubStatus: hubFailed, HubMessage: err.Error()}
+		var none errNotSignedIn
+		var refused errSignInRefused
+		var away errUnreachable
+		switch {
+		case errors.As(err, &none):
+			why.HubStatus = hubSignedOut
+		case errors.As(err, &refused):
+			why.HubStatus = hubRefused
+		case errors.As(err, &away):
+			why.HubStatus = hubUnreachable
+		}
+		note, cause := hubNote(why)
+		fmt.Println()
+		printLines(paragraph(2, plain(note)))
+		if cause != "" {
+			printLines(paragraph(2, seg{cause, c.dim}))
+		}
 	}
-	show := func(title string, installed map[string]installedPlugin) {
-		fmt.Println(title)
+	// An agent: its name and where its plugins are, then a row each.
+	section := func(target string, where []seg, rows []string) {
+		fmt.Println()
+		head := new(row).at(2, seg{agentName(target), c.bold})
+		if len(where) > 0 {
+			head.add(plain("  ")).add(where...)
+		}
+		fmt.Println(head.String())
+		printLines(rows)
+	}
+	// Each plugin: its name, its version, and how it stands against the hub.
+	show := func(target string, where []seg, installed map[string]installedPlugin) {
+		names, versions := 0, 0
+		for name, p := range installed {
+			names, versions = max(names, cols(name)), max(versions, cols(clean(p.version)))
+		}
+		var rows []string
 		if len(installed) == 0 {
-			fmt.Println("  nothing from line-lx yet")
+			rows = []string{new(row).at(5, seg{"nothing from line-lx yet", c.dim}).String()}
 		}
 		for _, name := range sortedKeys(installed) {
 			p := installed[name]
-			fmt.Printf("  %-24s %-10s %s\n", name, clean(p.version), hubState(hub, rels, name, p))
+			state := hubState(hub, rels, name, p)
+			paint := c.dim
+			switch {
+			case state == stateCurrent:
+				paint = c.green
+			case strings.HasPrefix(state, "update available"):
+				paint = c.bold
+			}
+			r := new(row).at(5, seg{name, c.bold}).at(5+names+2, seg{clean(p.version), c.dim})
+			if state != "" { // without the hub's answer, there's nothing to compare with
+				r.at(5+names+2+versions+3, seg{clean(state), paint})
+			}
+			rows = append(rows, r.String())
 		}
+		section(target, where, rows)
 	}
 
 	found := false
-	for _, t := range fileTargets() {
-		if t.detected() {
-			found = true
-			show(fmt.Sprintf("%s (%s)", t.name, t.dir), fileInstalled(t))
-		}
-	}
 	if claudeDetected() {
 		found = true
 		market, _, _, err := claudeConnection(hub)
+		note := func(text string) []string { return paragraph(5, seg{text, c.dim}) }
 		switch {
 		case err != nil:
-			fmt.Printf("%s\n  can't read its settings: %v\n", claudeTarget, err)
+			section(claudeTarget, nil, note("can't read its settings: "+err.Error()))
 		case market == "":
-			fmt.Printf("%s\n  not connected to the hub: run `line-lx sync`\n", claudeTarget)
+			section(claudeTarget, nil, note("not connected to the hub: run `line-lx sync`"))
 		case !claudeOnPath():
-			fmt.Printf("%s (%s)\n  connected; line-lx lists its plugins only with `claude` on PATH\n", claudeTarget, market)
+			section(claudeTarget, []seg{{market, c.dim}}, note("connected; line-lx lists its plugins only with `claude` on PATH"))
 		default:
 			// What Claude Code installed from the hub's marketplace, but the bundle: it's not a plugin of the hub.
 			versions, err := claudeInstalled(market)
 			if err != nil {
-				fmt.Printf("%s (%s)\n  can't list its plugins: %v\n", claudeTarget, market, err)
+				section(claudeTarget, []seg{{market, c.dim}}, note("can't list its plugins: "+err.Error()))
 				break
 			}
 			installed := map[string]installedPlugin{}
@@ -289,13 +439,28 @@ func runList() error {
 					installed[name] = installedPlugin{version: v, hub: hub}
 				}
 			}
-			show(fmt.Sprintf("%s (%s, installed by Claude Code)", claudeTarget, market), installed)
+			show(claudeTarget, []seg{{market + " · installed by Claude Code", c.dim}}, installed)
+		}
+	}
+	for _, t := range fileTargets() {
+		if t.detected() {
+			found = true
+			show(t.name, []seg{{tilde(t.dir), c.dim}}, fileInstalled(t))
 		}
 	}
 	if !found {
-		fmt.Println(errNoAgent)
+		fmt.Println()
+		printLines(paragraph(2, plain(errNoAgent.Error())))
 	}
 	return nil
+}
+
+// doctorCheck is one of doctor's rows: its outcome, what it checks, what it found (text, then more in dim), what to do
+// about it, and a dim note.
+type doctorCheck struct {
+	kind              int
+	label, text, more string
+	fix, note         string
 }
 
 func runDoctor() error {
@@ -303,14 +468,20 @@ func runDoctor() error {
 	if err != nil {
 		return err
 	}
-	ok := true
-	check := func(name string, good bool, msg string) {
-		mark := "ok  "
-		if !good {
-			mark, ok = "FAIL", false
+	checks := doctorChecks(hub)
+	renderDoctor(os.Stdout, checks, colorDepth(os.Stdout))
+	for _, k := range checks {
+		if k.kind == checkFail {
+			return errSilent{}
 		}
-		fmt.Printf("%s %-12s %s\n", mark, name, msg)
 	}
+	return nil
+}
+
+// doctorChecks checks the hub, the sign-in and each agent. A failure makes doctor exit 1; a warning doesn't.
+func doctorChecks(hub string) []doctorCheck {
+	var checks []doctorCheck
+	add := func(k doctorCheck) { checks = append(checks, k) }
 
 	res, err := httpClient.Get(hub + "/api/health")
 	if err == nil {
@@ -324,9 +495,9 @@ func runDoctor() error {
 		}
 	}
 	if err != nil {
-		check("hub", false, hub+" · "+err.Error())
+		add(doctorCheck{kind: checkFail, label: "Hub", text: hostOf(hub), more: " · " + err.Error()})
 	} else {
-		check("hub", true, hub+" · reachable")
+		add(doctorCheck{kind: checkOK, label: "Hub", text: hostOf(hub), more: " · reachable"})
 	}
 
 	var rels map[string]release
@@ -334,49 +505,29 @@ func runDoctor() error {
 	if err == nil {
 		var m me
 		if err = api.do("GET", "/api/me", nil, &m); err == nil {
-			check("sign-in", true, fmt.Sprintf("%s %s · workspace %s (%s)", clean(m.User.Name), clean(m.User.Email), clean(m.Org.Name), clean(m.Role)))
-			rels, err = hubReleases(api)
-		}
-	}
-	if err != nil {
-		check("sign-in", false, err.Error())
-	}
-
-	// compare says how a target's plugins stand against the hub's latest versions.
-	compare := func(installed map[string]installedPlugin) (bool, string) {
-		if rels == nil {
-			return true, plural(len(installed), "plugin") + " installed"
-		}
-		var current, behind int
-		for name := range rels {
-			if p, has := installed[name]; has && hubState(hub, rels, name, p) == stateCurrent {
-				current++
-			} else {
-				behind++
+			add(doctorCheck{kind: checkOK, label: "Sign-in", text: clean(m.User.Name),
+				more: " " + clean(m.User.Email) + " · " + clean(m.Org.Name) + " · " + clean(m.Role)})
+			if rels, err = hubReleases(api); err != nil {
+				add(doctorCheck{kind: checkFail, label: "Plugins", text: "can't list the hub's plugins: " + err.Error()})
 			}
+			err = nil
 		}
-		msg := fmt.Sprintf("%d of %s up to date", current, plural(len(rels), "plugin"))
-		if behind > 0 {
-			msg += ": run `line-lx sync`"
-		}
-		return behind == 0, msg
+	}
+	var none errNotSignedIn
+	var refused errSignInRefused
+	switch {
+	case errors.As(err, &none):
+		add(doctorCheck{kind: checkFail, label: "Sign-in", text: none.why, fix: "Run `line-lx login`."})
+	case errors.As(err, &refused):
+		add(doctorCheck{kind: checkFail, label: "Sign-in", text: "the hub didn't accept it", fix: "Run `line-lx login`."})
+	case err != nil:
+		add(doctorCheck{kind: checkFail, label: "Sign-in", text: err.Error()})
 	}
 
 	found := false
-	for _, t := range fileTargets() {
-		if !t.detected() {
-			fmt.Printf("     %-12s not found (no %s)\n", t.name, t.home)
-			continue
-		}
-		found = true
-		good, msg := compare(fileInstalled(t))
-		check(t.name, good, t.dir+" · "+msg)
-		if t.restart != "" {
-			fmt.Printf("     %-12s %s\n", "", t.restart)
-		}
-	}
+	name := agentName(claudeTarget)
 	if !claudeDetected() {
-		fmt.Printf("     %-12s not found (no ~/.claude, no `claude` on PATH)\n", claudeTarget)
+		add(doctorCheck{kind: checkNone, label: name, text: "not found"})
 	} else {
 		found = true
 		settings, _ := claudeSettingsPath()
@@ -386,17 +537,17 @@ func runDoctor() error {
 		}
 		switch {
 		case claudeSkipped(err):
-			check(claudeTarget, true, err.Error())
+			add(doctorCheck{kind: checkNone, label: name, text: err.Error()})
 		case err != nil:
-			check(claudeTarget, false, err.Error())
+			add(doctorCheck{kind: checkFail, label: name, text: err.Error()})
 		case market == "":
-			check(claudeTarget, false, settings+" · not connected to the hub: run `line-lx sync`")
+			add(doctorCheck{kind: checkFail, label: name, text: "not connected to the hub", more: " · " + tilde(settings), fix: "Run `line-lx sync`."})
 		case problem != "" && where != settings:
-			check(claudeTarget, false, where+" · "+problem+": ask who manages Claude Code's managed settings")
+			add(doctorCheck{kind: checkFail, label: name, text: problem, more: " · " + tilde(where), fix: "Ask who manages Claude Code's managed settings."})
 		case problem != "":
-			check(claudeTarget, false, where+" · "+problem+": run `line-lx sync`")
+			add(doctorCheck{kind: checkFail, label: name, text: problem, more: " · " + tilde(where), fix: "Run `line-lx sync`."})
 		default:
-			check(claudeTarget, true, where+" · connected: Claude Code gets the hub's plugins as "+bundlePlugin+"@"+market)
+			add(doctorCheck{kind: checkOK, label: name, text: "connected", more: " · " + tilde(where)})
 		}
 		// A warning, not a failure: line-lx can't tell the Claude Code of the desktop app or an IDE.
 		if claudeOnPath() {
@@ -404,26 +555,94 @@ func runDoctor() error {
 			version, good := claudeVersionOK(string(out))
 			switch {
 			case err != nil:
-				fmt.Printf("warn %-12s can't tell Claude Code's version: %v\n", "", err)
+				add(doctorCheck{kind: checkWarn, label: name, text: "can't tell its version: " + err.Error()})
 			case !good:
-				fmt.Printf("warn %-12s %s\n", "", outdatedText(version))
+				add(doctorCheck{kind: checkWarn, label: name, text: outdatedText(version), fix: claudeUpdate})
 			default:
-				fmt.Printf("     %-12s Claude Code %s\n", "", version)
+				add(doctorCheck{kind: checkOK, label: name, text: version, more: " · " + minClaudeVersion + " or later"})
 			}
 		}
 		// A warning: the next report that reaches the hub clears it.
 		if msg := droppedText(readDropped()); msg != "" {
-			fmt.Printf("warn %-12s %s\n", "", msg)
+			text, fix, _ := strings.Cut(msg, ". ")
+			add(doctorCheck{kind: checkWarn, label: "Reports", text: text, fix: fix + "."})
 		}
 	}
-	if !found {
-		check("agents", false, "none found: install Codex, pi or Claude Code")
-	}
 
-	if !ok {
-		return errSilent{}
+	// compare says how a target's plugins stand against the hub's latest versions.
+	compare := func(installed map[string]installedPlugin) (bool, string) {
+		if rels == nil {
+			return true, plural(len(installed), "plugin") + " installed"
+		}
+		var current int
+		for name := range rels {
+			if p, has := installed[name]; has && hubState(hub, rels, name, p) == stateCurrent {
+				current++
+			}
+		}
+		return current == len(rels), fmt.Sprintf("%d of %s up to date", current, plural(len(rels), "plugin"))
 	}
-	return nil
+	for _, t := range fileTargets() {
+		if !t.detected() {
+			add(doctorCheck{kind: checkNone, label: agentName(t.name), text: "not found"})
+			continue
+		}
+		found = true
+		good, msg := compare(fileInstalled(t))
+		k := doctorCheck{kind: checkOK, label: agentName(t.name), text: tilde(t.dir), more: " · " + msg, note: t.restart}
+		if !good {
+			k.kind, k.fix = checkFail, "Run `line-lx sync`."
+		}
+		add(k)
+	}
+	if !found {
+		add(doctorCheck{kind: checkFail, label: "Agents", text: "none found", fix: "Install Codex, pi or Claude Code."})
+	}
+	return checks
+}
+
+// renderDoctor writes doctor's checks, a row each with its fix under it, then how many problems and warnings.
+func renderDoctor(w io.Writer, checks []doctorCheck, c painter) {
+	writeHeader(w, c, []seg{plain("doctor")}, nil)
+	fmt.Fprintln(w)
+	var problems, warnings int
+	for _, k := range checks {
+		text := plain(k.text)
+		if k.kind == checkNone {
+			text.paint = c.dim
+		}
+		rows := checkRow(c, k.kind, k.label, text, seg{k.more, c.dim})
+		if k.fix != "" {
+			rows = append(rows, fixRow(c, checkCol, k.fix)...)
+		}
+		if k.note != "" {
+			rows = append(rows, noteRow(c, checkCol, k.note)...)
+		}
+		for _, r := range rows {
+			fmt.Fprintln(w, r)
+		}
+		switch k.kind {
+		case checkFail:
+			problems++
+		case checkWarn:
+			warnings++
+		}
+	}
+	fmt.Fprintln(w)
+	var sum []seg
+	if problems > 0 {
+		sum = append(sum, seg{plural(problems, "problem"), c.red})
+	}
+	if warnings > 0 {
+		if len(sum) > 0 {
+			sum = append(sum, seg{" · ", c.dim})
+		}
+		sum = append(sum, seg{plural(warnings, "warning"), c.bold})
+	}
+	if len(sum) == 0 {
+		sum = []seg{{"All good.", c.green}}
+	}
+	fmt.Fprintln(w, new(row).at(2, sum...).String())
 }
 
 func plural(n int, word string) string {

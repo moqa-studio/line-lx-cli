@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,6 +127,16 @@ func (e errSignInRefused) Error() string {
 	return fmt.Sprintf("The hub at %s didn't accept your sign-in. Run `line-lx login`.", e.hub)
 }
 
+// errUnreachable: a request didn't reach the hub, or got no answer.
+type errUnreachable struct {
+	hub string
+	err error
+}
+
+func (e errUnreachable) Error() string {
+	return fmt.Sprintf("Can't reach the hub at %s: %v", e.hub, e.err)
+}
+
 // do sends a JSON request and decodes the answer into out (when not nil).
 func (c *hubClient) do(method, path string, in, out any) error {
 	var data []byte
@@ -164,7 +175,7 @@ func (c *hubClient) send(method, target string, data []byte) (*http.Response, er
 			req.Header.Set("Content-Type", "application/json")
 		}
 		if res, err = httpClient.Do(req); err != nil {
-			return nil, fmt.Errorf("Can't reach the hub at %s: %v", c.hub, err)
+			return nil, errUnreachable{c.hub, err}
 		}
 		wait, err := strconv.Atoi(res.Header.Get("Retry-After"))
 		if try > 0 || res.StatusCode != http.StatusTooManyRequests || err != nil || wait < 0 || wait > 30 {
@@ -271,7 +282,14 @@ func runWhoami() error {
 	if err := c.do("GET", "/api/me", nil, &m); err != nil {
 		return err
 	}
-	fmt.Printf("%s %s\nworkspace  %s (%s)\nrole       %s\nhub        %s\n",
-		clean(m.User.Name), clean(m.User.Email), clean(m.Org.Name), clean(m.Org.Slug), clean(m.Role), c.hub)
+	p := colorDepth(os.Stdout)
+	writeHeader(os.Stdout, p, []seg{plain(clean(m.User.Name))}, []seg{{clean(m.User.Email), p.dim}})
+	for _, kv := range [][2]string{
+		{"workspace", clean(m.Org.Name) + " (" + clean(m.Org.Slug) + ")"},
+		{"role", clean(m.Role)},
+		{"hub", c.hub},
+	} {
+		fmt.Println(new(row).at(6, seg{kv[0], p.dim}).at(17, plain(kv[1])).String())
+	}
 	return nil
 }

@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -57,6 +56,7 @@ type statusReport struct {
 	HubStatus  string           `json:"hubStatus"`
 	HubMessage string           `json:"hubMessage,omitempty"`
 	Agents     []statusAgent    `json:"agents"`
+	person     string           // who is signed in, from the hub: for people only
 }
 
 type statusWorkspace struct {
@@ -103,8 +103,25 @@ type statusPlugin struct {
 }
 
 type statusSkill struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Review      *statusReview `json:"review"` // from the hub: the security review of the version it delivered
+}
+
+// statusReview is a skill's security review, as the web app's badge says it.
+type statusReview struct {
+	Status string       `json:"status"` // pending, done or failed
+	Label  string       `json:"label"`  // the web app's words, such as "No findings" or "To review"
+	Tone   string       `json:"tone"`   // ok, neutral, attention or danger
+	Counts reviewCounts `json:"counts"`
+}
+
+// reviewCounts are a review's findings, per severity.
+type reviewCounts struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
 }
 
 type statusHook struct {
@@ -121,22 +138,31 @@ type hubInstalled struct {
 		Target        string  `json:"target"`
 		LastFetchedAt *string `json:"lastFetchedAt"`
 		Plugins       []struct {
-			Name             string        `json:"name"`
-			Route            *int          `json:"route"` // an older hub doesn't send it
-			Line             *string       `json:"line"`
-			LatestVersion    *string       `json:"latestVersion"`
-			DeliveredVersion *string       `json:"deliveredVersion"`
-			FirstDeliveredAt *string       `json:"firstDeliveredAt"`
-			LastDeliveredAt  *string       `json:"lastDeliveredAt"`
-			Skills           []statusSkill `json:"skills"`
-			Hooks            []statusHook  `json:"hooks"`
+			Name             string       `json:"name"`
+			Route            *int         `json:"route"` // an older hub doesn't send it
+			Line             *string      `json:"line"`
+			LatestVersion    *string      `json:"latestVersion"`
+			DeliveredVersion *string      `json:"deliveredVersion"`
+			FirstDeliveredAt *string      `json:"firstDeliveredAt"`
+			LastDeliveredAt  *string      `json:"lastDeliveredAt"`
+			Skills           []hubSkill   `json:"skills"`
+			Hooks            []statusHook `json:"hooks"`
 		} `json:"plugins"`
 	} `json:"agents"`
+}
+
+// hubSkill is a skill in the hub's answer. Its review is read on its own: one in a shape line-lx doesn't know (an
+// older or newer hub) is dropped, never a reason to refuse the whole answer.
+type hubSkill struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Review      json.RawMessage `json:"review"`
 }
 
 // hubView is what status knows from the hub, checked: names are valid, text is clean and bounded.
 type hubView struct {
 	status, message string
+	person          string // who is signed in, when the hub says
 	workspace       *statusWorkspace
 	agents          map[string]hubAgentView // by target
 	latest          map[string]*string      // every plugin the hub lists, for any agent: its latest version
@@ -168,14 +194,33 @@ func fetchHubView(hub string) hubView {
 		return hubView{status: hubFailed, message: err.Error()}
 	}
 	api := &hubClient{hub: hub, token: token}
-	res, err := api.send("GET", hub+"/api/me/installed", nil)
+	// Who is signed in, for the header, at the same time: without the hub's answer, the header leaves it out.
+	person := make(chan string, 1)
+	go func() {
+		var m me
+		if api.do("GET", "/api/me", nil, &m) != nil {
+			m.User.Name = ""
+		}
+		person <- bounded(m.User.Name, 100)
+	}()
+	v := askInstalled(api)
+	if v.status == hubOK {
+		v.person = <-person
+	}
+	return v
+}
+
+// askInstalled asks the hub what it delivered to the person, with api's sign-in (GET /api/me/installed). It never
+// fails: a hub that can't say gives a view with the reason.
+func askInstalled(api *hubClient) hubView {
+	res, err := api.send("GET", api.hub+"/api/me/installed", nil)
 	var refused errSignInRefused
 	var ae *apiError
 	switch {
 	case errors.As(err, &refused):
 		return hubView{status: hubRefused, message: err.Error()}
 	case errors.As(err, &ae) && ae.status == http.StatusNotFound:
-		return hubView{status: hubUnsupported, message: fmt.Sprintf("The hub at %s doesn't say what it delivered yet: it needs an update.", hub)}
+		return hubView{status: hubUnsupported, message: fmt.Sprintf("The hub at %s doesn't say what it delivered yet: it needs an update.", api.hub)}
 	case errors.As(err, &ae):
 		return hubView{status: hubFailed, message: err.Error()}
 	case err != nil: // send fails otherwise only when the request doesn't reach the hub
@@ -196,6 +241,7 @@ var hookEvent = regexp.MustCompile(`^[A-Za-z]{1,64}$`)
 const (
 	maxDescription = 1024 // the Agent Skills spec's limit
 	maxCommand     = 1000
+	maxLabel       = 40 // a review's label: the web app's badges say it in a few words
 )
 
 // readHubView checks the hub's answer: a plugin or skill whose name isn't a valid one is dropped, a version
@@ -250,14 +296,32 @@ func checkedVersion(s *string) *string {
 	return &v
 }
 
-func checkedSkills(in []statusSkill) []statusSkill {
+func checkedSkills(in []hubSkill) []statusSkill {
 	out := []statusSkill{}
 	for _, s := range in {
 		if validName(s.Name) && !slices.ContainsFunc(out, func(o statusSkill) bool { return o.Name == s.Name }) {
-			out = append(out, statusSkill{Name: s.Name, Description: bounded(s.Description, maxDescription)})
+			out = append(out, statusSkill{Name: s.Name, Description: bounded(s.Description, maxDescription), Review: checkedReview(s.Review)})
 		}
 	}
 	return out
+}
+
+// checkedReview reads a skill's review from the hub: a status or a tone line-lx doesn't know, an empty label or any
+// other shape is no review. The label is the web app's words, cleaned and bounded; a count below zero is zero.
+func checkedReview(raw json.RawMessage) *statusReview {
+	var r statusReview
+	if len(raw) == 0 || json.Unmarshal(raw, &r) != nil {
+		return nil
+	}
+	r.Label = bounded(r.Label, maxLabel)
+	if !slices.Contains([]string{"pending", "done", "failed"}, r.Status) ||
+		!slices.Contains([]string{"ok", "neutral", "attention", "danger"}, r.Tone) || r.Label == "" {
+		return nil
+	}
+	for _, n := range []*int{&r.Counts.Critical, &r.Counts.High, &r.Counts.Medium, &r.Counts.Low} {
+		*n = max(0, *n)
+	}
+	return &r
 }
 
 func checkedHooks(in []statusHook) []statusHook {
@@ -560,23 +624,42 @@ func mergePlugins(target, hub string, local map[string]localPlugin, hv hubView) 
 	return out
 }
 
-// describe gives the skills found here the hub's description when their SKILL.md has none on one line.
+// describe gives the skills found here the hub's description when their SKILL.md has none on one line, and the
+// hub's review of the skill of that name. They come in one order for every agent: the hub's (the web app's), then the
+// ones the hub doesn't list, by name.
 func describe(local, hub []statusSkill) []statusSkill {
 	out := []statusSkill{}
+	at := func(name string) int {
+		return slices.IndexFunc(hub, func(h statusSkill) bool { return h.Name == name })
+	}
 	for _, s := range local {
-		if s.Description == "" {
-			if i := slices.IndexFunc(hub, func(h statusSkill) bool { return h.Name == s.Name }); i >= 0 {
+		if i := at(s.Name); i >= 0 {
+			if s.Description == "" {
 				s.Description = hub[i].Description
 			}
+			s.Review = hub[i].Review
 		}
 		out = append(out, s)
 	}
+	rank := func(s statusSkill) int {
+		if i := at(s.Name); i >= 0 {
+			return i
+		}
+		return len(hub)
+	}
+	slices.SortFunc(out, func(a, b statusSkill) int {
+		if d := rank(a) - rank(b); d != 0 {
+			return d
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out
 }
 
 // buildStatus reads this machine, and puts it side by side with the hub's view, for each agent line-lx knows.
 func buildStatus(hub string, hv hubView) statusReport {
-	r := statusReport{Schema: statusSchema, Hub: hub, Workspace: hv.workspace, HubStatus: hv.status, HubMessage: hv.message, Agents: []statusAgent{}}
+	r := statusReport{Schema: statusSchema, Hub: hub, Workspace: hv.workspace, HubStatus: hv.status, HubMessage: hv.message,
+		Agents: []statusAgent{}, person: hv.person}
 
 	claude := statusAgent{Target: claudeTarget, Found: claudeDetected(), Plugins: []statusPlugin{}}
 	if claude.Found {
@@ -611,178 +694,15 @@ func buildStatus(hub string, hv hubView) statusReport {
 
 // --- For people ---
 //
-// The output reads like the metro-lx map: each agent a terminus, each plugin a line, in the color and with
-// the route number the web app gives it, and its skills and hooks the stations on it, each with its part's
-// shape on its pastel. The colors are the web app's (front/src/index.css). A color never goes without its
-// shape or its word, so the output says the same without color.
-
-// statusWidth is the width the output fits in: 80 columns.
-const statusWidth = 80
-
-// rgb is a color of the web app's palette.
-type rgb struct{ r, g, b uint8 }
-
-var (
-	ink         = rgb{0x12, 0x12, 0x12}
-	paper       = rgb{0xff, 0xff, 0xff}
-	okGreen     = rgb{0x00, 0x80, 0x1c} // --ok: up to date, connected
-	skillPastel = rgb{0x9e, 0xdf, 0xfd} // --part-skill
-	hookPastel  = rgb{0x9e, 0xeb, 0xc0} // --part-hook
-)
-
-// metroLine is a line as the web app draws it.
-type metroLine struct {
-	route int
-	color rgb
-	digit rgb  // its route bullet's digit: paper, or ink on the orange and the yellow
-	edged bool // its stroke takes the line's darker edge: the yellow alone doesn't show on a light terminal
-}
-
-// metroLines are the lines the hub puts plugins on (GET /api/me/installed), by name.
-var metroLines = map[string]metroLine{
-	"engineering": {1, rgb{0x01, 0x4c, 0xc1}, paper, false},
-	"product":     {2, rgb{0xb9, 0x33, 0xad}, paper, false},
-	"marketing":   {3, rgb{0xf9, 0x7c, 0x2b}, ink, false},
-	"sales":       {4, rgb{0xfb, 0xdc, 0x1a}, ink, true},
-	"support":     {5, rgb{0x00, 0x80, 0x1c}, paper, false},
-	"everyone":    {6, ink, paper, false},
-}
-
-// edge is c at 70% mixed with black: the edge of every line in the web app, which keeps the yellow visible on white.
-func (c rgb) edge() rgb {
-	dark := func(v uint8) uint8 { return uint8((int(v)*7 + 5) / 10) }
-	return rgb{dark(c.r), dark(c.g), dark(c.b)}
-}
-
-// xterm256 is the closest of xterm's 256 colors to c: a color of the 6×6×6 cube, or one of the 24 grays.
-func xterm256(c rgb) int {
-	levels := [6]int{0, 95, 135, 175, 215, 255}
-	dist := func(r, g, b int) int {
-		dr, dg, db := int(c.r)-r, int(c.g)-g, int(c.b)-b
-		return dr*dr + dg*dg + db*db
-	}
-	nearest := func(v uint8) int {
-		best := 0
-		for i, l := range levels {
-			if abs(int(v)-l) < abs(int(v)-levels[best]) {
-				best = i
-			}
-		}
-		return best
-	}
-	r, g, b := nearest(c.r), nearest(c.g), nearest(c.b)
-	best, bestDist := 16+36*r+6*g+b, dist(levels[r], levels[g], levels[b])
-	for i := range 24 {
-		if v := 8 + 10*i; dist(v, v, v) < bestDist {
-			best, bestDist = 232+i, dist(v, v, v)
-		}
-	}
-	return best
-}
-
-func abs(n int) int { return max(n, -n) }
-
-// painter colors text for a terminal: with no color, 256 colors, or 24-bit color.
-type painter int
-
-const (
-	noColor painter = iota
-	colors256
-	trueColor
-)
-
-func (p painter) paint(code, s string) string {
-	if p == noColor || s == "" {
-		return s
-	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
-}
-
-func (p painter) bold(s string) string { return p.paint("1", s) }
-func (p painter) dim(s string) string  { return p.paint("2", s) }
-
-// color is c as a foreground (layer 38) or background (48), at p's depth.
-func (p painter) color(layer int, c rgb) string {
-	if p == trueColor {
-		return fmt.Sprintf("%d;2;%d;%d;%d", layer, c.r, c.g, c.b)
-	}
-	return fmt.Sprintf("%d;5;%d", layer, xterm256(c))
-}
-
-func (p painter) fg(c rgb, s string) string { return p.paint(p.color(38, c), s) }
-
-// on draws s in fg on bg, as a chip.
-func (p painter) on(bg, fg rgb, s string) string {
-	return p.paint(p.color(48, bg)+";"+p.color(38, fg), s)
-}
-
-// bullet is a plugin's sign at the head of its line, 3 columns: its route number on its line's color, the
-// interchange ring for the bundle (it isn't a team's line), and nothing for a plugin the hub gives no line.
-func (p painter) bullet(pl statusPlugin) string {
-	l, ok := lineOf(pl)
-	switch {
-	case pl.Bundle:
-		return " ◎ "
-	case !ok:
-		return "   "
-	case p == noColor:
-		return fmt.Sprintf("(%d)", l.route)
-	case l.color == ink: // reverse video: an ink disc on a light terminal, a light one on a dark terminal
-		return p.paint("1;7", fmt.Sprintf(" %d ", l.route))
-	}
-	return p.paint("1;"+p.color(48, l.color)+";"+p.color(38, l.digit), fmt.Sprintf(" %d ", l.route))
-}
-
-// stroke draws s in a plugin's line color; the ink line, the bundle and a plugin with no line in the
-// terminal's own text color, which is ink on a light terminal and still shows on a dark one.
-func (p painter) stroke(pl statusPlugin, s string) string {
-	l, ok := lineOf(pl)
-	switch {
-	case !ok || l.color == ink:
-		return s
-	case l.edged:
-		return p.fg(l.color.edge(), s)
-	}
-	return p.fg(l.color, s)
-}
-
-// part is a skill's or a hook's chip, 3 columns: the part's shape in ink on its pastel, as on the website.
-func (p painter) part(kind string) string {
-	if kind == "hook" {
-		return p.on(hookPastel, ink, " ▲ ")
-	}
-	return p.on(skillPastel, ink, " ● ")
-}
-
-func lineOf(p statusPlugin) (metroLine, bool) {
-	if p.Line == nil {
-		return metroLine{}, false
-	}
-	l, ok := metroLines[*p.Line]
-	return l, ok
-}
-
-// colorDepth is how status colors f: not at all when it isn't a terminal or color isn't allowed, in 24-bit
-// when COLORTERM says the terminal has it, else in xterm's 256 colors.
-func colorDepth(f *os.File) painter {
-	info, err := f.Stat()
-	switch ct := os.Getenv("COLORTERM"); {
-	case err != nil || info.Mode()&os.ModeCharDevice == 0 || !colorAllowed():
-		return noColor
-	case ct == "truecolor" || ct == "24bit":
-		return trueColor
-	}
-	return colors256
-}
-
-// colorAllowed is false when NO_COLOR (https://no-color.org) or TERM=dumb is set.
-func colorAllowed() bool { return os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" }
+// One card per agent found here: each plugin with its line's badge, its version, its state and its last update, then
+// its skills, each with its security review, and its hooks. Above the cards, how much is up to date, counted per plugin
+// and agent; under them, the agents that aren't here. Descriptions and hook commands stay in --json.
 
 // ago is a time for people, as the web app says it: "just now", "5m ago", "2h ago", "yesterday", "3d ago",
-// then the date.
+// then the date. "—" when unknown.
 func ago(t *time.Time, now time.Time) string {
 	if t == nil {
-		return "–"
+		return "—"
 	}
 	d := now.Sub(*t)
 	switch {
@@ -798,82 +718,6 @@ func ago(t *time.Time, now time.Time) string {
 		return "yesterday"
 	}
 	return fmt.Sprintf("%dd ago", d/(24*time.Hour))
-}
-
-// fit cuts s to n columns, the last one an ellipsis when it was longer.
-func fit(s string, n int) string {
-	if cols(s) <= n {
-		return s
-	}
-	if n < 1 {
-		return ""
-	}
-	var b strings.Builder
-	used := 0
-	for _, r := range s {
-		w := runeCols(r)
-		if used+w > n-1 {
-			break
-		}
-		b.WriteRune(r)
-		used += w
-	}
-	return b.String() + "…"
-}
-
-// pad fills s with spaces to n columns (fmt's %-*s counts bytes, not columns).
-func pad(s string, n int) string {
-	return s + strings.Repeat(" ", max(0, n-cols(s)))
-}
-
-// cols is how many columns s takes in a terminal: a wide character (CJK, most emoji) two, a combining mark none.
-func cols(s string) int {
-	n := 0
-	for _, r := range s {
-		n += runeCols(r)
-	}
-	return n
-}
-
-func runeCols(r rune) int {
-	switch {
-	case unicode.In(r, unicode.Mn, unicode.Me):
-		return 0
-	case wide(r):
-		return 2
-	}
-	return 1
-}
-
-// wide is true for the East Asian wide and fullwidth blocks, and the emoji shown wide.
-func wide(r rune) bool {
-	switch {
-	case r < 0x1100:
-		return false
-	case r <= 0x115F, // Hangul Jamo
-		0x2E80 <= r && r <= 0x303E,                             // CJK radicals, symbols and punctuation
-		0x3041 <= r && r <= 0x33FF,                             // kana, CJK compatibility
-		0x3400 <= r && r <= 0x4DBF, 0x4E00 <= r && r <= 0x9FFF, // CJK ideographs
-		0xA000 <= r && r <= 0xA4CF,                             // Yi
-		0xAC00 <= r && r <= 0xD7A3,                             // Hangul syllables
-		0xF900 <= r && r <= 0xFAFF,                             // CJK compatibility ideographs
-		0xFE30 <= r && r <= 0xFE4F,                             // CJK compatibility forms
-		0xFF00 <= r && r <= 0xFF60, 0xFFE0 <= r && r <= 0xFFE6, // fullwidth forms
-		0x1F300 <= r && r <= 0x1F64F, 0x1F680 <= r && r <= 0x1F6FF, 0x1F900 <= r && r <= 0x1F9FF, // emoji
-		0x1FA70 <= r && r <= 0x1FAFF,
-		0x20000 <= r && r <= 0x3FFFD: // CJK extensions
-		return true
-	}
-	return false
-}
-
-// tilde writes a path under the home folder as ~/….
-func tilde(path string) string {
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" && strings.HasPrefix(path, home+string(os.PathSeparator)) {
-		return "~" + path[len(home):]
-	}
-	return path
 }
 
 // hubNote says why status shows only what this machine has, and the error when it tells more; "" when the
@@ -895,104 +739,232 @@ func hubNote(r statusReport) (note, cause string) {
 	return "The hub's answer failed, so " + alone, r.HubMessage
 }
 
-// statusText is a plugin's state in the web app's words, and how it's painted: green when up to date, grey
-// when it isn't here or isn't the hub's. Nothing here has failed or is blocked, so nothing is red.
-func statusText(p statusPlugin, c painter) (string, func(string) string) {
+// stateSeg is a plugin's state in the web app's words: green when up to date, bold when behind, dim when it isn't
+// here or isn't the hub's. Nothing here has failed or is blocked, so nothing is red.
+func stateSeg(p statusPlugin, c painter) seg {
 	switch p.State {
 	case pluginUpToDate:
-		return "up to date", func(s string) string { return c.fg(okGreen, s) }
+		return seg{"up to date", c.green}
 	case pluginBehind:
-		return "behind", c.bold
+		return seg{"behind", c.bold}
 	case pluginMissing:
-		return "not installed", c.dim
+		return seg{"not installed", c.dim}
 	case pluginNotInHub:
-		return "not in the hub", c.dim
+		return seg{"not in the hub", c.dim}
 	case pluginOtherHub:
-		return "other hub", c.dim
+		return seg{"other hub", c.dim}
 	}
-	return "installed", func(s string) string { return s }
+	return seg{"installed", c.dim}
 }
 
-// versionText is the version here, with the hub's newer one when it's behind: "v1.0.0 → v1.1.0". The
-// bundle's is a hash, without the v. "" when it isn't here.
-func versionText(p statusPlugin) string {
+// versionSegs is the version here, with the hub's newer one in bold when it's behind: "v1.0.0 → v1.1.0". The
+// bundle's is a hash, without the v, and alone when it's behind: the hub's hash tells a person nothing (it's in
+// --json). "—" when it isn't here.
+func versionSegs(p statusPlugin, c painter) []seg {
 	v := func(s *string) string {
 		switch {
 		case s == nil:
-			return "–"
+			return "—"
 		case p.Bundle:
 			return *s
 		}
 		return "v" + *s
 	}
-	switch p.State {
-	case pluginMissing:
-		return ""
-	case pluginBehind:
-		return v(p.Version) + " → " + v(p.LatestVersion)
+	switch {
+	case p.State == pluginMissing:
+		return []seg{{"—", c.dim}}
+	case p.State == pluginBehind && p.Bundle:
+		return []seg{plain(v(p.Version))}
+	case p.State == pluginBehind:
+		return []seg{plain(v(p.Version)), {" → ", c.dim}, {v(p.LatestVersion), c.bold}}
 	}
-	return v(p.Version)
+	return []seg{{v(p.Version), c.dim}}
 }
 
-// renderStatus writes the report for people: the workspace and the hub, then each agent as a terminus with
-// its plugins' lines, in 80 columns.
-func renderStatus(w io.Writer, r statusReport, now time.Time, c painter) {
-	head := c.bold("metro-lx")
-	switch {
-	case r.Workspace != nil && r.Workspace.Name != "":
-		head += " · " + r.Workspace.Name + " (" + r.Workspace.Slug + ")"
-	case r.Workspace != nil:
-		head += " · " + r.Workspace.Slug
+// dateOf is a plugin's last update: this machine's, else the hub's.
+func dateOf(p statusPlugin, now time.Time) string {
+	if p.State == pluginMissing {
+		return "—"
 	}
-	fmt.Fprintln(w, head)
-	fmt.Fprintln(w, c.dim("hub")+"  "+strings.TrimPrefix(r.Hub, "https://"))
-	if note, cause := hubNote(r); note != "" {
-		fmt.Fprintln(w, note)
-		if cause != "" {
-			fmt.Fprintln(w, c.dim(cause))
+	return ago(firstOf(p.UpdatedAt, p.LastDeliveredAt), now)
+}
+
+// reviewParts is a skill's security review, in parts: the web app's label as it is, split at its " · ", then the
+// worst findings when they're at medium or above, as in "To review", "1 medium". Its mark says its tone.
+func reviewParts(r *statusReview, c painter) (mark seg, parts []seg) {
+	mark, paint := seg{"·", c.dim}, c.dim
+	switch r.Tone {
+	case "ok":
+		mark = seg{"✓", c.green}
+	case "attention":
+		mark, paint = seg{"!", c.bold}, nil
+	case "danger":
+		mark, paint = seg{"✗", c.red}, nil
+	}
+	for _, text := range strings.Split(r.Label, " · ") {
+		parts = append(parts, seg{text, paint})
+	}
+	for _, worst := range []struct {
+		n    int
+		name string
+	}{{r.Counts.Critical, "critical"}, {r.Counts.High, "high"}, {r.Counts.Medium, "medium"}} {
+		if worst.n > 0 {
+			return mark, append(parts, seg{fmt.Sprintf("%d %s", worst.n, worst.name), c.dim})
 		}
 	}
-	found, apart := false, true
+	return mark, parts
+}
+
+// reviewLines lays a review out in room columns: "! To review · 1 medium" when it fits, else broken at its " · ", the
+// lines after the first two columns in, under the label. Nothing of it is ever cut. Nothing without a review.
+func reviewLines(r *statusReview, c painter, room int) [][]seg {
+	if r == nil {
+		return nil
+	}
+	mark, parts := reviewParts(r, c)
+	lines := [][]seg{{mark, plain(" ")}}
+	used := 2 // the mark and its space, or the indent of the lines after
+	for i, p := range parts {
+		last := len(lines) - 1
+		switch {
+		case i > 0 && used+3+cols(p.text) > room:
+			lines, used = append(lines, nil), 2
+			last++
+		case i > 0:
+			lines[last], used = append(lines[last], seg{" · ", p.paint}), used+3
+		}
+		lines[last], used = append(lines[last], p), used+cols(p.text)
+	}
+	return lines
+}
+
+// tally counts the plugins of the agents here, once per plugin and agent. Another hub's, and one whose latest
+// version isn't known, aren't the hub's to count.
+type tally struct{ upToDate, behind, missing, gone int }
+
+func (t tally) total() int { return t.upToDate + t.behind + t.missing + t.gone }
+
+func countPlugins(r statusReport) tally {
+	var t tally
 	for _, a := range r.Agents {
-		lines := agentLines(a, now, c)
-		// A blank line around each agent with lines under it; the others follow one another.
-		if apart || len(lines) > 1 {
-			fmt.Fprintln(w)
+		for _, p := range a.Plugins {
+			switch p.State {
+			case pluginUpToDate:
+				t.upToDate++
+			case pluginBehind:
+				t.behind++
+			case pluginMissing:
+				t.missing++
+			case pluginNotInHub:
+				t.gone++
+			}
 		}
-		apart = len(lines) > 1
-		for _, l := range lines {
-			fmt.Fprintln(w, l)
-		}
-		found = found || a.Found
 	}
-	if !found {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, errNoAgent)
-	}
+	return t
 }
 
-// agentLines is an agent for people: its terminus, how it's connected, then each plugin's line with its
-// stations, and what to run to catch up with the hub.
-func agentLines(a statusAgent, now time.Time, c painter) []string {
-	var parts []string
+// progressRow is how much is up to date: a line of 26 cells, green for the part up to date, then the counts. The line
+// gets shorter when the counts need the room.
+func progressRow(t tally, c painter) string {
+	count := []seg{{fmt.Sprintf("%d of %d", t.upToDate, t.total()), c.bold}, plain(" up to date")}
+	var rest []string
+	for _, part := range []struct {
+		n    int
+		word string
+	}{{t.behind, "behind"}, {t.missing, "not installed"}, {t.gone, "not in the hub"}} {
+		if part.n > 0 {
+			rest = append(rest, fmt.Sprintf("%d %s", part.n, part.word))
+		}
+	}
+	if len(rest) > 0 {
+		count = append(count, seg{" · " + strings.Join(rest, " · "), c.dim})
+	}
+	cells := min(26, max(8, screenEnd-2-2-segsWidth(count)))
+	done := int(float64(t.upToDate)/float64(t.total())*float64(cells) + 0.5)
+	return new(row).at(2, seg{strings.Repeat("━", done), c.green}, seg{strings.Repeat("─", cells-done), c.dim}, plain("  ")).
+		add(count...).String()
+}
+
+// statusLayout is where each column starts inside the cards, the same in every card: the badge, the plugin's name,
+// its version, its parts (skills and hooks), its state, and the inside's width, where the last update ends. Names and
+// versions are never cut: a long one moves the columns after it, and widens the cards.
+type statusLayout struct {
+	badges                            bool // the hub gave the lines: without it, the badge column is left out
+	name, version, part, state, inner int
+}
+
+func layoutStatus(r statusReport, now time.Time) statusLayout {
+	l := statusLayout{badges: r.HubStatus == hubOK}
+	if l.badges {
+		l.name = 5
+	}
+	l.part = l.name + 4
+	var names, versions, parts, states, dates int
+	for _, a := range r.Agents {
+		if a.Found {
+			for _, p := range a.Plugins {
+				names = max(names, cols(p.Name))
+				versions = max(versions, segsWidth(versionSegs(p, noColor)))
+				states = max(states, cols(stateSeg(p, noColor).text))
+				dates = max(dates, cols(dateOf(p, now)))
+				for _, s := range p.Skills {
+					parts = max(parts, cols(s.Name))
+				}
+				for _, h := range p.Hooks {
+					parts = max(parts, cols(h.Event))
+				}
+			}
+		}
+	}
+	l.version = l.name + names + 2
+	// The states, and the parts' reviews under them, line up after the versions and the parts' names, unless an
+	// unusually long version would push them out of 80 columns: then that row's state alone moves. A long name moves
+	// them all, and widens the cards.
+	l.state = max(l.name+35, min(l.version+versions+3, cardInner-states-2-dates), l.part+parts+2)
+	l.inner = cardInner
+	for _, a := range r.Agents {
+		if !a.Found {
+			continue
+		}
+		l.inner = max(l.inner, cols(agentName(a.Target))+segsWidth(agentState(a, now, noColor))+3)
+		for _, p := range a.Plugins {
+			l.inner = max(l.inner, l.stateAt(p)+cols(stateSeg(p, noColor).text)+2+cols(dateOf(p, now)))
+			// A review breaks at its " · " to stay inside: only a part too long for any line widens the cards.
+			for _, s := range p.Skills {
+				if s.Review != nil {
+					_, review := reviewParts(s.Review, noColor)
+					for _, part := range review {
+						l.inner = max(l.inner, l.state+2+cols(part.text))
+					}
+				}
+			}
+		}
+	}
+	return l
+}
+
+// stateAt is where a plugin's state starts: in the state column, or three columns after a version too long for it.
+func (l statusLayout) stateAt(p statusPlugin) int {
+	return max(l.state, l.version+segsWidth(versionSegs(p, noColor))+3)
+}
+
+// agentState is how an agent is connected, for its card's top border.
+func agentState(a statusAgent, now time.Time, c painter) []seg {
 	switch {
-	case !a.Found && a.Target == claudeTarget:
-		parts = append(parts, c.dim("not found (no ~/.claude, no `claude` on PATH)"))
-	case !a.Found:
-		parts = append(parts, c.dim("not found"))
 	case a.Target == claudeTarget && a.Connected:
-		parts = append(parts, c.fg(okGreen, "connected"))
+		out := []seg{{"connected", c.green}}
 		// This machine's time when Claude Code recorded one, else the hub's.
 		switch fetched := firstOf(a.Marketplace.FetchedAt, a.Marketplace.HubFetchedAt); {
 		case !a.Marketplace.Fetched:
-			parts = append(parts, "not fetched yet: start Claude Code")
+			out = append(out, plain(" · not fetched yet: start Claude Code"))
 		case fetched != nil:
-			parts = append(parts, "fetched "+ago(fetched, now))
+			out = append(out, plain(" · fetched "+ago(fetched, now)))
 		}
-	case a.Target == claudeTarget && a.Problem == "":
-		parts = append(parts, c.dim("not connected"), "run `line-lx sync`")
+		return out
+	case a.Target == claudeTarget && a.Problem != "":
+		return []seg{{"not connected", c.dim}}
 	case a.Target == claudeTarget:
-		parts = append(parts, c.dim("not connected"))
+		return []seg{{"not connected", c.dim}, plain(" · run `line-lx sync`")}
 	case a.Connected:
 		var last *time.Time
 		for _, p := range a.Plugins {
@@ -1000,52 +972,52 @@ func agentLines(a statusAgent, now time.Time, c painter) []string {
 				last = p.UpdatedAt
 			}
 		}
-		parts = append(parts, c.fg(okGreen, "set up"), tilde(a.Location))
+		out := []seg{{"set up", c.green}}
 		if last != nil {
-			parts = append(parts, "synced "+ago(last, now))
-		}
-	default:
-		parts = append(parts, c.dim("not set up"), "run `line-lx sync`")
-	}
-	out := []string{"▌" + c.bold(agentName(a.Target)) + strings.Repeat(" ", max(1, 14-cols(agentName(a.Target)))) + strings.Join(parts, " · ")}
-	if !a.Found {
-		return out
-	}
-	if a.Problem != "" {
-		out = append(out, "  "+fit(a.Problem+".", statusWidth-2))
-	}
-	if len(a.Plugins) == 0 {
-		if a.Connected {
-			out = append(out, "  "+c.dim("nothing installed from the hub yet"))
+			out = append(out, plain(" · synced "+ago(last, now)))
 		}
 		return out
 	}
+	return []seg{{"not set up", c.dim}, plain(" · run `line-lx sync`")}
+}
 
-	// The names line up; a version and the state follow. Names and versions are never cut: a version can be
-	// the bundle's 12-character hash, or two versions.
-	wn := 0
-	for _, p := range a.Plugins {
-		wn = max(wn, cols(p.Name))
-	}
+// agentCard is an agent's card: each plugin, a blank line apart, with its skills and hooks under its name, then what's
+// wrong with the connection and what to run to catch up with the hub.
+func agentCard(a statusAgent, l statusLayout, now time.Time, c painter) card {
+	k := card{title: agentName(a.Target), state: agentState(a, now, c)}
 	var missing, behind, gone int
 	for i, p := range a.Plugins {
-		branch, under := "├─ ", "│   "
-		if i == len(a.Plugins)-1 {
-			branch, under = "└─ ", "    "
+		if i > 0 {
+			k.rows = append(k.rows, new(row))
 		}
-		word, paint := statusText(p, c)
-		version := versionText(p)
-		row, width := c.dim(branch)+c.bullet(p)+" "+c.bold(pad(p.Name, wn)), 3+3+1+wn
-		if version != "" {
-			row, width = row+"  "+version, width+2+cols(version)
+		head := new(row)
+		if l.badges {
+			line := ""
+			if p.Line != nil {
+				line = *p.Line
+			}
+			head.at(0, c.badge(line, p.Bundle))
 		}
-		row, width = row+"  "+paint(word), width+2+cols(word)
-		// The last update, here, else the hub's, when it fits.
-		if when := ago(firstOf(p.UpdatedAt, p.LastDeliveredAt), now); p.State != pluginMissing && when != "–" && width+3+cols(when) <= statusWidth {
-			row += c.dim(" · " + when)
+		head.at(l.name, seg{p.Name, c.bold}).at(l.version, versionSegs(p, c)...).at(l.stateAt(p), stateSeg(p, c))
+		k.rows = append(k.rows, head.right(l.inner, seg{dateOf(p, now), c.dim}))
+		if p.From != "" {
+			k.rows = append(k.rows, new(row).at(l.part, seg{fit("from "+p.From, l.inner-l.part), c.dim}))
 		}
-		out = append(out, c.dim("│"), row)
-		out = append(out, stationLines(p, under, c)...)
+		for _, s := range p.Skills {
+			r := new(row).at(l.name, c.chip("skill")).add(plain(" " + s.Name))
+			review := reviewLines(s.Review, c, l.inner-l.state)
+			if len(review) > 0 {
+				r.at(l.state, review[0]...)
+			}
+			k.rows = append(k.rows, r)
+			for _, more := range review[min(1, len(review)):] {
+				k.rows = append(k.rows, new(row).at(l.state+2, more...))
+			}
+		}
+		for _, h := range p.Hooks {
+			k.rows = append(k.rows, new(row).at(l.name, c.chip("hook")).add(plain(" "+h.Event)).
+				at(l.state, seg{fitWords("runs "+h.Command, l.inner-l.state), c.dim}))
+		}
 		switch p.State {
 		case pluginMissing:
 			missing++
@@ -1056,60 +1028,93 @@ func agentLines(a statusAgent, now time.Time, c painter) []string {
 		}
 	}
 
-	switch {
-	case a.Target != claudeTarget && missing+behind+gone > 0:
-		out = append(out, "  "+c.dim("Run `line-lx sync` to catch up with the hub."))
-	case a.Target == claudeTarget && missing > 0:
-		out = append(out, "  "+c.dim("Run `line-lx sync`, or start Claude Code, to install what's missing."))
-	case a.Target == claudeTarget && behind+gone > 0:
-		out = append(out, "  "+c.dim("Claude Code catches up with the hub by itself, in its next session."))
+	var notes [][]seg
+	if a.Problem != "" {
+		notes = append(notes, []seg{plain(a.Problem + ".")})
 	}
-	return out
+	switch {
+	case len(a.Plugins) == 0:
+		notes = append(notes, []seg{{"Nothing installed from the hub yet.", c.dim}})
+	case a.Target != claudeTarget && missing+behind+gone > 0:
+		notes = append(notes, []seg{{"Run `line-lx sync` to catch up with the hub.", c.dim}})
+	case a.Target == claudeTarget && missing > 0:
+		notes = append(notes, []seg{{"Run `line-lx sync`, or start Claude Code, to install what's missing.", c.dim}})
+	case a.Target == claudeTarget && behind+gone > 0:
+		notes = append(notes, []seg{{"Claude Code catches up with the hub by itself, in its next session.", c.dim}})
+	}
+	if len(notes) > 0 && len(a.Plugins) > 0 {
+		k.rows = append(k.rows, new(row))
+	}
+	for _, n := range notes {
+		for _, line := range flow(n, l.inner) {
+			k.rows = append(k.rows, new(row).add(line...))
+		}
+	}
+	return k
 }
 
-// descriptionRoom is the least room a description gets on its name's line; with less, it goes under it.
-const descriptionRoom = 20
+// renderStatus writes the report for people: the workspace, who is signed in and the hub, how much is up to date,
+// then a card per agent here, and the agents that aren't.
+func renderStatus(w io.Writer, r statusReport, now time.Time, c painter) {
+	var title, right []seg
+	if r.Workspace != nil {
+		name := r.Workspace.Name
+		if name == "" {
+			name = r.Workspace.Slug
+		}
+		title = []seg{plain(name)}
+	}
+	if r.person != "" {
+		right = []seg{{"signed in as " + r.person, c.dim}}
+	}
+	writeHeader(w, c, title, right)
+	fmt.Fprintln(w, new(row).at(6, seg{"hub", c.dim}).add(plain("  "+hostOf(r.Hub))).String())
+	if note, cause := hubNote(r); note != "" {
+		fmt.Fprintln(w)
+		for _, line := range paragraph(2, plain(note)) {
+			fmt.Fprintln(w, line)
+		}
+		if cause != "" {
+			for _, line := range paragraph(2, seg{cause, c.dim}) {
+				fmt.Fprintln(w, line)
+			}
+		}
+	}
+	if t := countPlugins(r); r.HubStatus == hubOK && t.total() > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, progressRow(t, c))
+	}
 
-// stationLines are a plugin's stations, on its line: where it came from, when that isn't the current hub,
-// then its skills and its hooks, each with its part's chip. Names are whole; a description (or a hook's
-// command) is cut to fit in 80 columns, on the name's line, or on the next one when a long name leaves too
-// little room.
-func stationLines(p statusPlugin, under string, c painter) []string {
-	type station struct{ kind, name, text string }
-	var stations []station
-	for _, s := range p.Skills {
-		stations = append(stations, station{"skill", s.Name, s.Description})
-	}
-	for _, h := range p.Hooks {
-		stations = append(stations, station{"hook", h.Event, h.Command})
-	}
-	// "│   ┃ ● name": the trunk, the line, the chip.
-	line := c.dim(under) + c.stroke(p, "┃")
-	const nameAt = 9
-	var out []string
-	if p.From != "" {
-		out = append(out, line+"    "+c.dim(fit("from "+p.From, statusWidth-nameAt)))
-	}
-	// The descriptions line up after the names, unless a name is so long the others would have no room.
-	wn := 0
-	for _, s := range stations {
-		if n := cols(s.name); s.text != "" && nameAt+n+2+descriptionRoom <= statusWidth {
-			wn = max(wn, n)
+	l := layoutStatus(r, now)
+	var cards []card
+	var away []statusAgent
+	for _, a := range r.Agents {
+		if a.Found {
+			cards = append(cards, agentCard(a, l, now, c))
+		} else {
+			away = append(away, a)
 		}
 	}
-	for _, s := range stations {
-		head := line + c.part(s.kind) + " "
-		if s.text == "" {
-			out = append(out, head+s.name)
-			continue
-		}
-		if room := statusWidth - nameAt - max(wn, cols(s.name)) - 2; room >= descriptionRoom {
-			out = append(out, head+pad(s.name, wn)+"  "+c.dim(fit(s.text, room)))
-			continue
-		}
-		out = append(out, head+s.name, line+"    "+c.dim(fit(s.text, statusWidth-nameAt)))
+	if len(cards) > 0 {
+		fmt.Fprintln(w)
+		renderCards(w, c, cards)
 	}
-	return out
+	if len(away) > 0 {
+		fmt.Fprintln(w)
+		wn := 0
+		for _, a := range away {
+			wn = max(wn, cols(agentName(a.Target)))
+		}
+		for _, a := range away {
+			fmt.Fprintln(w, new(row).at(2, seg{"○", c.dim}).at(5, seg{agentName(a.Target), c.bold}).at(5+wn+2, seg{"not found", c.dim}).String())
+		}
+	}
+	if len(cards) == 0 {
+		fmt.Fprintln(w)
+		for _, line := range paragraph(2, plain(errNoAgent.Error())) {
+			fmt.Fprintln(w, line)
+		}
+	}
 }
 
 func firstOf(times ...*time.Time) *time.Time {

@@ -72,6 +72,16 @@ func main() {
 	}
 	status.Flags().BoolVar(&jsonFlag, "json", false, "print it as JSON, in the format the README documents")
 
+	var monthFlag, usageJSON bool
+	usage := &cobra.Command{
+		Use:   "usage",
+		Short: "Show your own runs of your org's plugins over the last 7 days",
+		Args:  cobra.NoArgs,
+		RunE:  func(*cobra.Command, []string) error { return runUsage(monthFlag, usageJSON) },
+	}
+	usage.Flags().BoolVar(&monthFlag, "month", false, "the last 30 days")
+	usage.Flags().BoolVar(&usageJSON, "json", false, "print it as JSON, in the format the README documents")
+
 	root.AddCommand(
 		setup,
 		login,
@@ -84,6 +94,7 @@ func main() {
 		&cobra.Command{Use: "list", Short: "List the plugins installed here, per agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runList() }},
 		status,
+		usage,
 		&cobra.Command{Use: "doctor", Short: "Check the Metro-LX hub, your sign-in and each agent", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runDoctor() }},
 		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,

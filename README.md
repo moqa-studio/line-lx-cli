@@ -65,51 +65,67 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx whoami` | Shows you, your workspace, your role and the hub. |
 | `line-lx sync` | Writes the newest version of each plugin to Codex and pi, removes the ones gone from the hub, and reports each delivery to the hub. Connects Claude Code to the hub. Exit 1 if a target failed or no agent is found. |
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
-| `line-lx status [--json]` | Shows, for each agent, whether it's connected to the hub, and each plugin it has from the hub: its version, whether it's behind, when it was installed and updated, its skills and hooks. Changes nothing. See [Status](#status). |
-| `line-lx doctor` | Checks the hub, your sign-in and each agent. Exit 1 when something is wrong. |
+| `line-lx status [--json]` | Shows, for each agent, whether it's connected to the hub, and each plugin it has from the hub: its version, whether it's behind, when it was last updated, its skills with their security review, and its hooks. Changes nothing. See [Status](#status). |
+| `line-lx usage [--month] [--json]` | Shows your own runs of your workspace's plugins over the last 7 days (`--month`: 30), per plugin and per agent. Needs a sign-in. Changes nothing. See [Your usage](#your-usage). |
+| `line-lx doctor` | Checks the hub, your sign-in and each agent, with the fix under each problem. Exit 1 when something is wrong. |
 | `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Only for Claude Code, which runs it to sign in to the hub. |
 | `line-lx report-usage --agent claude-code --workspace <slug>` | Reports one use of your workspace's plugins to the hub. Only for the hub's Claude Code hook, which gives it the use on stdin. Always exits 0. See [Usage reports](#usage-reports). |
 | `line-lx --version` | Prints the version. |
 
 Agents are used only when found on the machine: Claude Code (`~/.claude` exists, or `claude` is on the PATH), Codex (`~/.codex` exists) and pi (`~/.pi/agent` exists). line-lx only changes folders carrying its stamp, and only for the hub that wrote them.
 
+Every command but `auth-header`, `report-usage` and `completion` prints for people, with one look: the metro-lx mark, then rows of checks (✓ ok, ✗ failed, ! a warning, · nothing to check) with the fix under each problem, or cards. It fits in 80 columns with normal data: names and versions are never cut, so a long one widens its column; other text is cut with "…" or wrapped. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256 colors. Green is kept for what's connected, set up, up to date or ok, and red for what failed. Without color, the shapes and words say the same, and a plugin's route shows in brackets, `(1)`. `sync` shows a spinner on the agent it's working on only on a terminal with color.
+
 ## Status
 
-`line-lx status` shows what's connected on this machine, drawn like the metro-lx map. Each agent is a terminus. Each plugin is a line, with the route number and the color the web app gives it. Its skills (●) and hooks (▲) are the stations on it.
+`line-lx status` shows what's connected on this machine: a card for each agent found here, and in it, each plugin it has from the hub, with the badge of the plugin's line, its version, its state and its last update. Under each plugin, its skills (●), each with its security review, and its hooks (▲). Skills come in the hub's order, the web app's, for every agent, then the ones the hub doesn't list, by name.
 
 ```
-metro-lx · Acme (acme)
-hub  hub.example.com
 
-▌Claude Code   connected · fetched 2h ago
-│
-├─ (1) moqa-kit         v1.0.0 → v1.1.0  behind · 9h ago
-│   ┃ ●  review  Review a pull request
-│
-├─ (4) posthog-dev-kit  v1.3.0  up to date · 8h ago
-│   ┃ ●  board-apple-ads  Build and maintain an Apple Ads dashboard that answer…
-│   ┃ ●  capture          Capture an event
-│
-└─  ◎  metro-lx         13cd9935af1d  up to date · yesterday
-    ┃ ▲  PostToolUse  line-lx report-usage --agent claude-code --workspace acme
-  Claude Code catches up with the hub by itself, in its next session.
+  ▌▌▌ metro-lx  Acme                                          signed in as Ada
+      hub  hub.example.com
 
-▌Codex         set up · ~/.codex/skills · synced 2d ago
-│
-└─ (4) posthog-dev-kit  v1.2.0 → v1.3.0  behind · 2d ago
-    ┃ ●  capture  Capture an event in PostHog
-  Run `line-lx sync` to catch up with the hub.
+  ━━━━━━━━━━────────────────  2 of 5 up to date · 2 behind · 1 not installed
 
-▌pi            not found
+  ╭─ Claude Code ─────────────────────────────── connected · fetched 2h ago ─╮
+  │                                                                          │
+  │  (1)  moqa-kit         v1.0.0 → v1.1.0   behind                  9h ago  │
+  │        ●  review                         ✓ No findings                   │
+  │        ●  website-creation               · No static findings            │
+  │                                                                          │
+  │  (4)  posthog-dev-kit  v1.3.0            up to date              8h ago  │
+  │        ●  board-apple-ads                ! To review · 1 medium          │
+  │        ●  capture                        ✓ No findings                   │
+  │                                                                          │
+  │   ◎   metro-lx         13cd9935af1d      up to date           yesterday  │
+  │        ▲  PostToolUse                    runs line-lx report-usage…      │
+  │                                                                          │
+  │  Claude Code catches up with the hub by itself, in its next session.     │
+  │                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ Codex ───────────────────────────────────────── set up · synced 2d ago ─╮
+  │                                                                          │
+  │  (1)  moqa-kit         —                 not installed                —  │
+  │                                                                          │
+  │  (4)  posthog-dev-kit  v1.2.0 → v1.3.0   behind                  2d ago  │
+  │        ●  capture                        ✓ No findings                   │
+  │                                                                          │
+  │  Run `line-lx sync` to catch up with the hub.                            │
+  │                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ○  pi  not found
 ```
 
 - **This machine.** For Claude Code, line-lx reads how its settings connect it to the hub (as `doctor` does), then Claude Code's own records: `plugins/known_marketplaces.json` (when it last fetched the marketplace), `plugins/installed_plugins.json` (each plugin's version and scope, when it was installed and last updated) and each plugin's folder in `plugins/cache/<marketplace>/<plugin>/` (its skills, and the hooks in `hooks/hooks.json`). It reads plugin files only inside that cache. A marketplace declared outside the settings files line-lx reads (an MDM profile) counts when Claude Code's records have it from the hub's URL. For Codex and pi, line-lx reads its own stamps and the skill folders it wrote. A stamp has the time of the last write, not of the first.
-- **The hub.** With your sign-in, line-lx asks the hub what it delivered to you (`GET /api/me/installed`): each plugin's line and route, its latest version, the version it delivered and when, and when Claude Code last fetched the marketplace. The hub's times are yours, on any of your machines. A plugin's last update shows this machine's time, else the hub's.
-- **Lines.** A plugin's route bullet and line take the color the web app gives it, from the hub: 1 engineering blue, 2 product purple, 3 marketing orange, 4 sales yellow, 5 support green, 6 everyone ink. `metro-lx`, Claude Code's bundle, isn't a team's line: it has the interchange ring ◎, in ink. A plugin with no line from the hub (a hub without them, another hub, a plugin the hub no longer has) is in ink, with no number.
-- **States.** `up to date` (green). `behind`: the version here isn't the hub's latest, shown after the arrow. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone. These three are grey. Red is kept for failed and blocked.
-- **Without the hub.** Not signed in, a sign-in the hub refuses, a hub that doesn't answer, or one too old to have `GET /api/me/installed` (404): line-lx shows what this machine has, and says why.
-- It writes nothing, installs nothing and runs no agent. Like every command, it refreshes an expired sign-in. It never prints the token. It exits 0, unless the configured hub URL isn't valid.
-- The output fits in 80 columns where it can. Plugin and skill names and versions are never cut, so a long one widens its column; a description or a hook's command is cut to fit, and goes on the next line when a long name leaves it too little room. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256 colors. Without color, the route numbers show in brackets, `(1)`, and the shapes and words say the same.
+- **The hub.** With your sign-in, line-lx asks the hub what it delivered to you (`GET /api/me/installed`): each plugin's line and route, its latest version, the version it delivered and when, each skill's security review, and when Claude Code last fetched the marketplace. It also asks who you are (`GET /api/me`), for the header. The hub's times are yours, on any of your machines. A plugin's last update shows this machine's time, else the hub's.
+- **The line at the top** counts each plugin once per agent: up to date (━, green), behind, not installed and no longer in the hub. Another hub's plugins aren't counted.
+- **Lines.** A plugin's badge has its route number on the color the web app gives its line: 1 engineering blue, 2 product purple, 3 marketing orange, 4 sales yellow, 5 support green, 6 everyone ink. `metro-lx`, Claude Code's bundle, isn't a team's line: it has the interchange ring ◎. A plugin with no line from the hub (another hub's, or one the hub no longer has) has no badge.
+- **States.** `up to date` (green). `behind` (bold): the version here isn't the hub's latest, shown after the arrow. For `metro-lx`, whose versions are hashes, only the one here shows; the hub's is in `--json`. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone. These three are grey.
+- **Security reviews.** Each skill shows its review in the web app's words, as the hub gives them ("No findings", "No static findings", "Low notes", "To review", "Flagged"…), after a mark for its tone: ✓ ok, · neutral, ! needs attention, ✗ danger. When the review found something at medium or above, the worst severity and its count follow: `· 1 medium`. A review is never cut: one too long for the card goes on at its `·`, on the next line, under the label. A skill name too long for its column moves the reviews of every card to the right. A skill the hub has no review for shows none. A hook shows what it runs.
+- **Without the hub.** Not signed in, a sign-in the hub refuses, a hub that doesn't answer, or one too old to have `GET /api/me/installed` (404): line-lx shows what this machine has, without badges, and says why.
+- Descriptions and hook commands are in `--json`, not in the cards. It writes nothing, installs nothing and runs no agent. Like every command, it refreshes an expired sign-in. It never prints the token. It exits 0, unless the configured hub URL isn't valid.
 
 ### `status --json`
 
@@ -142,8 +158,47 @@ hub  hub.example.com
 | `.scope` | Optional, Claude Code only: `user`, `project` or `local`. With several, the `user` one. |
 | `.installedAt`, `.updatedAt` | From this machine's records |
 | `.deliveredVersion`, `.firstDeliveredAt`, `.lastDeliveredAt` | From the hub: what it delivered to you for that agent, and when |
-| `.skills[]` | `{ "name", "description" }`: the skills here, else the hub's |
+| `.skills[]` | `{ "name", "description", "review" }`: the skills here, else the hub's |
+| `.skills[].review` | From the hub: the security review of the skill in the version it delivered, `{ "status", "label", "tone", "counts" }`, or `null` without one (a hub that doesn't give reviews, or a skill it doesn't have). `status`: `pending`, `done` or `failed`. `label`: the web app's words, such as `No findings` or `To review`. `tone`: `ok`, `neutral`, `attention` or `danger`; a review with another tone is `null`. `counts`: `{ "critical", "high", "medium", "low" }`, the findings per severity. |
 | `.hooks[]` | `{ "event", "command" }`: Claude Code's command hooks here, else the hub's |
+
+## Your usage
+
+`line-lx usage` shows your own runs of your workspace's plugins: the skills an agent reported it ran, as the web app's Usage page counts them. One bar per plugin, in its line's color and in the web app's order, then one per agent. `--month` shows the last 30 days instead of 7.
+
+```
+
+  ▌▌▌ metro-lx  Your runs · last 7 days                                53 runs
+
+  (1)  moqa-kit          ████████████████████████████████████████   35
+
+  (4)  posthog-dev-kit   ████████████████████▋                      18
+
+  BY AGENT
+
+       Claude Code       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   49
+       Codex             ━━━                                         4
+
+  Only your own runs. Admins see the workspace's totals in the web app.
+  Run `line-lx usage --month` for the last 30 days.
+```
+
+- It reads `GET /api/usage/mine`, and counts the rows an agent reported (`source` `agent`) of a skill that ran (`kind` `activated`). Deliveries, fetches, MCP calls and failures aren't runs. The lines and the order come from `GET /api/me/installed`, and whether agent reporting is on from `GET /api/usage/settings`.
+- Runs are only counted while an admin turns on agent reporting (see [Usage reports](#usage-reports)). With no runs, it says whether reporting is off.
+- It needs a sign-in: without one, it says to run `line-lx login` and exits 1. It writes nothing.
+
+`line-lx usage --json` prints the same as one JSON object. `schema` is 1, as for `status --json`.
+
+| Field | Is |
+|---|---|
+| `schema` | `1` |
+| `hub` | The hub's URL |
+| `period` | `week` (7 days, today included) or `month` (30) |
+| `since` | The first day counted, `YYYY-MM-DD`, from the hub |
+| `agentReporting` | Whether the workspace's agent reporting is on, `null` when the hub didn't say |
+| `runs` | Your runs in the period |
+| `plugins[]` | `{ "name", "route", "line", "runs" }`, in the web app's order, then by name. `route` and `line` as in `status --json`, `null` for a plugin the hub gives no line. |
+| `agents[]` | `{ "agent", "name", "runs" }`, most runs first. `agent` is the hub's id (`claude-code`, `codex`, `pi`…), `name` its name for people. |
 
 ## Claude Code
 

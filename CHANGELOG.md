@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-23
+
+### Added
+
+- `usage` shows your own runs of your workspace's plugins over the last 7 days, or 30 with `--month`: the skills an agent reported it ran, counted as the web app's Usage page counts them. One bar per plugin, in its line's color and in the web app's order, then one per agent. With no runs, it says whether the workspace's agent reporting is off. `--json` prints it in a stable format, documented in the README. It needs a sign-in, and writes nothing.
+
+### Changed
+
+- Every command for people has one look: the metro-lx mark at the top, rows of checks (✓ ok, ✗ failed, ! a warning, · nothing to check) with the fix under each problem, line badges and part chips as in the web app, in 80 columns. Green is kept for what's connected, set up, up to date or ok, and red for what failed. `auth-header` and `report-usage` print as before.
+- `status` shows a card per agent, with its connection in the card's top border, and above the cards how many plugins are up to date, counted per plugin and agent. Each plugin has its line's badge, its version, its state and its last update, with its skills and hooks under it. Each skill shows its security review, in the web app's words ("No findings", "To review · 1 medium"…), never cut: a long one goes on at its `·` on the next line. Skills come in the hub's order for every agent. A `metro-lx` behind shows only the hash it has here. Descriptions and hook commands are only in `--json` now. Without the hub, plugins have no badge.
+- `list` without the hub's answer says why, in `status`'s words: not signed in, a sign-in the hub refuses, or a hub that didn't answer.
+- `doctor` puts the fix under each problem, and ends with how many problems and warnings it found. Its checks and exit code are the same.
+- `sync` and `setup` show a row per agent, a spinner on the one they're working on (on a terminal with color only), then the plugins written to Codex and pi: added, updated from which version, or removed. Claude Code's row says whether it installs new versions itself or gets them at its next start. `sync` ends with how long it took.
+- `status --json` gives each skill its `review` from the hub: `{ "status", "label", "tone", "counts" }`, or `null`. The schema is still 1.
+
 ## [0.4.1] - 2026-11-23
 
 ### Changed
@@ -80,7 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...v0.3.0
