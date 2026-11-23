@@ -70,12 +70,12 @@ func statusAnswer(hub string) string {
 	plugins := func(delivered string) string {
 		return `[
       {"name": "notes", "route": 1, "line": "engineering", "latestVersion": "1.2.0", "deliveredVersion": "` + delivered + `", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-18T09:00:00Z", "behind": false,
-       "skills": [{"name": "jot", "description": "Jot a note", "review": {"status": "done", "label": "No findings", "tone": "ok", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}}},
-         {"name": "summary", "description": "Sum up the notes of the day", "review": {"status": "done", "label": "To review", "tone": "attention", "counts": {"critical": 0, "high": 0, "medium": 1, "low": 2}}}], "hooks": []},
+       "skills": [{"name": "summary", "description": "Sum up the notes of the day", "review": {"status": "done", "label": "To review", "tone": "attention", "counts": {"critical": 0, "high": 0, "medium": 1, "low": 2}}},
+         {"name": "jot", "description": "Jot a note", "review": {"status": "done", "label": "No findings", "tone": "ok", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}}}], "hooks": []},
       {"name": "tools", "route": 2, "line": "product", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
-       "skills": [{"name": "lint", "description": "Lint the repository", "review": {"status": "done", "label": "No static findings", "tone": "neutral", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}}}], "hooks": []},
+       "skills": [{"name": "lint", "description": "Lint the repository", "review": {"status": "done", "label": "Low notes · no secret scan", "tone": "neutral", "counts": {"critical": 1, "high": 0, "medium": 0, "low": 3}}}], "hooks": []},
       {"name": "extra", "route": 3, "line": "marketing", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
-       "skills": [{"name": "help", "description": "Help", "review": {"status": "done", "label": "Flagged", "tone": "danger", "counts": {"critical": 1, "high": 2, "medium": 0, "low": 0}}}], "hooks": []}`
+       "skills": [{"name": "help", "description": "Help", "review": {"status": "done", "label": "Flagged · Cisco in part", "tone": "danger", "counts": {"critical": 0, "high": 1, "medium": 0, "low": 0}}}], "hooks": []}`
 	}
 	return `{"workspace": {"slug": "dev", "name": "Dev"}, "hub": "` + hub + `", "agents": [
     {"target": "claude-code", "lastFetchedAt": "2026-11-19T08:00:00Z", "plugins": ` + plugins("1.2.0") + `,
@@ -162,7 +162,7 @@ func statusMachine(t *testing.T, hub string) string {
 	putFile(t, filepath.Join(pi, "notes", "jot", "SKILL.md"), "---\nname: jot\ndescription: Jot a note\n---\n")
 	putFile(t, filepath.Join(pi, "notes", "summary", "SKILL.md"), "---\nname: summary\n---\n")
 	putFile(t, filepath.Join(pi, "theirs", ".line-lx.json"), `{"hub": "https://other.example.com", "plugin": "theirs", "version": "3.0.0", "versionId": "x", "syncedAt": "2026-11-19T11:00:00Z"}`)
-	putFile(t, filepath.Join(pi, "theirs", "help-them", "SKILL.md"), "---\nname: help-them\ndescription: Helps with what the other hub offers, from start to end\n---\n")
+	putFile(t, filepath.Join(pi, "theirs", "help-with-everything-they-offer", "SKILL.md"), "---\nname: help-with-everything-they-offer\ndescription: Helps with what the other hub offers, from start to end\n---\n")
 	return home
 }
 
@@ -306,6 +306,11 @@ func TestStatusWithoutHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("signed out", hubSignedOut, "Not signed in")
+	// list says the same, and not that the hub didn't answer.
+	if out := captureStdout(t, func() { _ = runList() }); !strings.Contains(out, "Not signed in, so this is only what's on this machine.") ||
+		strings.Contains(out, "didn't answer") {
+		t.Errorf("list, signed out:\n%s", out)
+	}
 	t.Setenv("LINE_LX_HUB", h.URL)
 	t.Setenv("LINE_LX_TOKEN", statusToken)
 	h.Close()

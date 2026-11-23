@@ -55,19 +55,21 @@ const statusGolden = `
 
   ╭─ Claude Code ─────────────────────────────── connected · fetched 2h ago ─╮
   │                                                                          │
-  │  (1)  notes      v1.2.0                     up to date        yesterday  │
-  │        ●  jot                               ✓ No findings                │
-  │        ●  summary                           ! To review · 1 medium       │
+  │  (1)  notes      v1.2.0                    up to date         yesterday  │
+  │        ●  summary                          ! To review · 1 medium        │
+  │        ●  jot                              ✓ No findings                 │
   │                                                                          │
-  │  (2)  tools      v1.0.0 → v1.1.0            behind          10 Nov 2026  │
-  │        ●  lint                              · No static findings         │
+  │  (2)  tools      v1.0.0 → v1.1.0           behind           10 Nov 2026  │
+  │        ●  lint                             · Low notes · no secret scan  │
+  │                                              1 critical                  │
   │                                                                          │
-  │  (3)  extra      —                          not installed             —  │
-  │        ●  help                              ✗ Flagged · 1 critical       │
+  │  (3)  extra      —                         not installed              —  │
+  │        ●  help                             ✗ Flagged · Cisco in part     │
+  │                                              1 high                      │
   │                                                                          │
-  │   ◎   metro-lx   13cd9935af1d → a1b2c3d4e5f6   behind       12 Nov 2026  │
-  │        ▲  PostToolUse                       runs line-lx report-usage…   │
-  │        ▲  PostToolUseFailure                runs line-lx report-usage…   │
+  │   ◎   metro-lx   13cd9935af1d              behind           12 Nov 2026  │
+  │        ▲  PostToolUse                      runs line-lx report-usage…    │
+  │        ▲  PostToolUseFailure               runs line-lx report-usage…    │
   │                                                                          │
   │  Run ` + "`" + `line-lx sync` + "`" + `, or start Claude Code, to install what's missing.    │
   │                                                                          │
@@ -75,16 +77,18 @@ const statusGolden = `
 
   ╭─ Codex ───────────────────────────────────────── set up · synced 2d ago ─╮
   │                                                                          │
-  │  (1)  notes      v1.1.0 → v1.2.0            behind               2d ago  │
-  │        ●  jot                               ✓ No findings                │
+  │  (1)  notes      v1.1.0 → v1.2.0           behind                2d ago  │
+  │        ●  jot                              ✓ No findings                 │
   │                                                                          │
-  │  (2)  tools      —                          not installed             —  │
-  │        ●  lint                              · No static findings         │
+  │  (2)  tools      —                         not installed              —  │
+  │        ●  lint                             · Low notes · no secret scan  │
+  │                                              1 critical                  │
   │                                                                          │
-  │  (3)  extra      —                          not installed             —  │
-  │        ●  help                              ✗ Flagged · 1 critical       │
+  │  (3)  extra      —                         not installed              —  │
+  │        ●  help                             ✗ Flagged · Cisco in part     │
+  │                                              1 high                      │
   │                                                                          │
-  │       old-notes  v2.0.0                     not in the hub   1 Sep 2026  │
+  │       old-notes  v2.0.0                    not in the hub    1 Sep 2026  │
   │        ●  gone                                                           │
   │                                                                          │
   │  Run ` + "`" + `line-lx sync` + "`" + ` to catch up with the hub.                            │
@@ -93,19 +97,21 @@ const statusGolden = `
 
   ╭─ pi ──────────────────────────────────────────── set up · synced 2m ago ─╮
   │                                                                          │
-  │  (1)  notes      v1.2.0                     up to date           2m ago  │
-  │        ●  jot                               ✓ No findings                │
-  │        ●  summary                           ! To review · 1 medium       │
+  │  (1)  notes      v1.2.0                    up to date            2m ago  │
+  │        ●  summary                          ! To review · 1 medium        │
+  │        ●  jot                              ✓ No findings                 │
   │                                                                          │
-  │  (2)  tools      —                          not installed             —  │
-  │        ●  lint                              · No static findings         │
+  │  (2)  tools      —                         not installed              —  │
+  │        ●  lint                             · Low notes · no secret scan  │
+  │                                              1 critical                  │
   │                                                                          │
-  │  (3)  extra      —                          not installed             —  │
-  │        ●  help                              ✗ Flagged · 1 critical       │
+  │  (3)  extra      —                         not installed              —  │
+  │        ●  help                             ✗ Flagged · Cisco in part     │
+  │                                              1 high                      │
   │                                                                          │
-  │       theirs     v3.0.0                     other hub            1h ago  │
+  │       theirs     v3.0.0                    other hub             1h ago  │
   │           from https://other.example.com                                 │
-  │        ●  help-them                                                      │
+  │        ●  help-with-everything-they-offer                                │
   │                                                                          │
   │  Run ` + "`" + `line-lx sync` + "`" + ` to catch up with the hub.                            │
   │                                                                          │
@@ -312,7 +318,7 @@ func TestStatusJSONContract(t *testing.T) {
 	if got := keys(notes); !slices.Equal(got, want) {
 		t.Errorf("plugin = %v\nwant %v", got, want)
 	}
-	summary := notes["skills"].([]any)[1].(map[string]any)
+	summary := notes["skills"].([]any)[0].(map[string]any) // the hub's order: summary, then jot
 	review := summary["review"].(map[string]any)
 	if got := keys(summary); !slices.Equal(got, []string{"description", "name", "review"}) {
 		t.Errorf("skill = %v", got)

@@ -355,9 +355,25 @@ func runList() error {
 		rels, err = hubReleases(api)
 	}
 	if err != nil {
+		// Why there's nothing to compare with, in status's words: the error itself when it tells more.
+		why := statusReport{HubStatus: hubFailed, HubMessage: err.Error()}
+		var none errNotSignedIn
+		var refused errSignInRefused
+		var away errUnreachable
+		switch {
+		case errors.As(err, &none):
+			why.HubStatus = hubSignedOut
+		case errors.As(err, &refused):
+			why.HubStatus = hubRefused
+		case errors.As(err, &away):
+			why.HubStatus = hubUnreachable
+		}
+		note, cause := hubNote(why)
 		fmt.Println()
-		printLines(paragraph(2, plain("The hub didn't answer, so this is only what's installed.")))
-		printLines(paragraph(2, seg{err.Error(), c.dim}))
+		printLines(paragraph(2, plain(note)))
+		if cause != "" {
+			printLines(paragraph(2, seg{cause, c.dim}))
+		}
 	}
 	// An agent: its name and where its plugins are, then a row each.
 	section := func(target string, where []seg, rows []string) {

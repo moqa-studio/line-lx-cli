@@ -625,11 +625,15 @@ func mergePlugins(target, hub string, local map[string]localPlugin, hv hubView) 
 }
 
 // describe gives the skills found here the hub's description when their SKILL.md has none on one line, and the
-// hub's review of the skill of that name.
+// hub's review of the skill of that name. They come in one order for every agent: the hub's (the web app's), then the
+// ones the hub doesn't list, by name.
 func describe(local, hub []statusSkill) []statusSkill {
 	out := []statusSkill{}
+	at := func(name string) int {
+		return slices.IndexFunc(hub, func(h statusSkill) bool { return h.Name == name })
+	}
 	for _, s := range local {
-		if i := slices.IndexFunc(hub, func(h statusSkill) bool { return h.Name == s.Name }); i >= 0 {
+		if i := at(s.Name); i >= 0 {
 			if s.Description == "" {
 				s.Description = hub[i].Description
 			}
@@ -637,6 +641,18 @@ func describe(local, hub []statusSkill) []statusSkill {
 		}
 		out = append(out, s)
 	}
+	rank := func(s statusSkill) int {
+		if i := at(s.Name); i >= 0 {
+			return i
+		}
+		return len(hub)
+	}
+	slices.SortFunc(out, func(a, b statusSkill) int {
+		if d := rank(a) - rank(b); d != 0 {
+			return d
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out
 }
 
@@ -742,7 +758,8 @@ func stateSeg(p statusPlugin, c painter) seg {
 }
 
 // versionSegs is the version here, with the hub's newer one in bold when it's behind: "v1.0.0 → v1.1.0". The
-// bundle's is a hash, without the v. "—" when it isn't here.
+// bundle's is a hash, without the v, and alone when it's behind: the hub's hash tells a person nothing (it's in
+// --json). "—" when it isn't here.
 func versionSegs(p statusPlugin, c painter) []seg {
 	v := func(s *string) string {
 		switch {
@@ -753,10 +770,12 @@ func versionSegs(p statusPlugin, c painter) []seg {
 		}
 		return "v" + *s
 	}
-	switch p.State {
-	case pluginMissing:
+	switch {
+	case p.State == pluginMissing:
 		return []seg{{"—", c.dim}}
-	case pluginBehind:
+	case p.State == pluginBehind && p.Bundle:
+		return []seg{plain(v(p.Version))}
+	case p.State == pluginBehind:
 		return []seg{plain(v(p.Version)), {" → ", c.dim}, {v(p.LatestVersion), c.bold}}
 	}
 	return []seg{{v(p.Version), c.dim}}
@@ -770,31 +789,53 @@ func dateOf(p statusPlugin, now time.Time) string {
 	return ago(firstOf(p.UpdatedAt, p.LastDeliveredAt), now)
 }
 
-// reviewSegs is a skill's security review: its tone's mark, the web app's label as it is, and the worst findings when
-// they're at medium or above, as in "! To review · 1 medium". Nothing without a review.
-func reviewSegs(r *statusReview, c painter) []seg {
-	if r == nil {
-		return nil
-	}
-	mark, label := seg{"·", c.dim}, seg{" " + r.Label, c.dim}
+// reviewParts is a skill's security review, in parts: the web app's label as it is, split at its " · ", then the
+// worst findings when they're at medium or above, as in "To review", "1 medium". Its mark says its tone.
+func reviewParts(r *statusReview, c painter) (mark seg, parts []seg) {
+	mark, paint := seg{"·", c.dim}, c.dim
 	switch r.Tone {
 	case "ok":
 		mark = seg{"✓", c.green}
 	case "attention":
-		mark, label.paint = seg{"!", c.bold}, nil
+		mark, paint = seg{"!", c.bold}, nil
 	case "danger":
-		mark, label.paint = seg{"✗", c.red}, nil
+		mark, paint = seg{"✗", c.red}, nil
 	}
-	segs := []seg{mark, label}
+	for _, text := range strings.Split(r.Label, " · ") {
+		parts = append(parts, seg{text, paint})
+	}
 	for _, worst := range []struct {
 		n    int
 		name string
 	}{{r.Counts.Critical, "critical"}, {r.Counts.High, "high"}, {r.Counts.Medium, "medium"}} {
 		if worst.n > 0 {
-			return append(segs, seg{fmt.Sprintf(" · %d %s", worst.n, worst.name), c.dim})
+			return mark, append(parts, seg{fmt.Sprintf("%d %s", worst.n, worst.name), c.dim})
 		}
 	}
-	return segs
+	return mark, parts
+}
+
+// reviewLines lays a review out in room columns: "! To review · 1 medium" when it fits, else broken at its " · ", the
+// lines after the first two columns in, under the label. Nothing of it is ever cut. Nothing without a review.
+func reviewLines(r *statusReview, c painter, room int) [][]seg {
+	if r == nil {
+		return nil
+	}
+	mark, parts := reviewParts(r, c)
+	lines := [][]seg{{mark, plain(" ")}}
+	used := 2 // the mark and its space, or the indent of the lines after
+	for i, p := range parts {
+		last := len(lines) - 1
+		switch {
+		case i > 0 && used+3+cols(p.text) > room:
+			lines, used = append(lines, nil), 2
+			last++
+		case i > 0:
+			lines[last], used = append(lines[last], seg{" · ", p.paint}), used+3
+		}
+		lines[last], used = append(lines[last], p), used+cols(p.text)
+	}
+	return lines
 }
 
 // tally counts the plugins of the agents here, once per plugin and agent. Another hub's, and one whose latest
@@ -858,7 +899,7 @@ func layoutStatus(r statusReport, now time.Time) statusLayout {
 		l.name = 5
 	}
 	l.part = l.name + 4
-	var names, versions, states, dates int
+	var names, versions, parts, states, dates int
 	for _, a := range r.Agents {
 		if a.Found {
 			for _, p := range a.Plugins {
@@ -866,15 +907,21 @@ func layoutStatus(r statusReport, now time.Time) statusLayout {
 				versions = max(versions, segsWidth(versionSegs(p, noColor)))
 				states = max(states, cols(stateSeg(p, noColor).text))
 				dates = max(dates, cols(dateOf(p, now)))
+				for _, s := range p.Skills {
+					parts = max(parts, cols(s.Name))
+				}
+				for _, h := range p.Hooks {
+					parts = max(parts, cols(h.Event))
+				}
 			}
 		}
 	}
 	l.version = l.name + names + 2
-	// The states line up after the versions, unless a long one (two of the bundle's hashes) would push them out of
-	// 80 columns: then that row's state alone moves.
-	l.state = max(l.name+35, min(l.version+versions+3, cardInner-states-2-dates))
+	// The states, and the parts' reviews under them, line up after the versions and the parts' names, unless an
+	// unusually long version would push them out of 80 columns: then that row's state alone moves. A long name moves
+	// them all, and widens the cards.
+	l.state = max(l.name+35, min(l.version+versions+3, cardInner-states-2-dates), l.part+parts+2)
 	l.inner = cardInner
-	// A part's review goes in the state column, or two columns after a name too long for it.
 	for _, a := range r.Agents {
 		if !a.Found {
 			continue
@@ -882,11 +929,14 @@ func layoutStatus(r statusReport, now time.Time) statusLayout {
 		l.inner = max(l.inner, cols(agentName(a.Target))+segsWidth(agentState(a, now, noColor))+3)
 		for _, p := range a.Plugins {
 			l.inner = max(l.inner, l.stateAt(p)+cols(stateSeg(p, noColor).text)+2+cols(dateOf(p, now)))
+			// A review breaks at its " · " to stay inside: only a part too long for any line widens the cards.
 			for _, s := range p.Skills {
-				l.inner = max(l.inner, l.partEnd(s.Name)+segsWidth(reviewSegs(s.Review, noColor)))
-			}
-			for _, h := range p.Hooks {
-				l.inner = max(l.inner, l.partEnd(h.Event))
+				if s.Review != nil {
+					_, review := reviewParts(s.Review, noColor)
+					for _, part := range review {
+						l.inner = max(l.inner, l.state+2+cols(part.text))
+					}
+				}
 			}
 		}
 	}
@@ -897,9 +947,6 @@ func layoutStatus(r statusReport, now time.Time) statusLayout {
 func (l statusLayout) stateAt(p statusPlugin) int {
 	return max(l.state, l.version+segsWidth(versionSegs(p, noColor))+3)
 }
-
-// partEnd is where what's said of a part (its review, what a hook runs) starts: in the state column, or after its name.
-func (l statusLayout) partEnd(name string) int { return max(l.state, l.part+cols(name)+2) }
 
 // agentState is how an agent is connected, for its card's top border.
 func agentState(a statusAgent, now time.Time, c painter) []seg {
@@ -957,11 +1004,19 @@ func agentCard(a statusAgent, l statusLayout, now time.Time, c painter) card {
 			k.rows = append(k.rows, new(row).at(l.part, seg{fit("from "+p.From, l.inner-l.part), c.dim}))
 		}
 		for _, s := range p.Skills {
-			k.rows = append(k.rows, new(row).at(l.name, c.chip("skill")).add(plain(" "+s.Name)).at(l.partEnd(s.Name), reviewSegs(s.Review, c)...))
+			r := new(row).at(l.name, c.chip("skill")).add(plain(" " + s.Name))
+			review := reviewLines(s.Review, c, l.inner-l.state)
+			if len(review) > 0 {
+				r.at(l.state, review[0]...)
+			}
+			k.rows = append(k.rows, r)
+			for _, more := range review[min(1, len(review)):] {
+				k.rows = append(k.rows, new(row).at(l.state+2, more...))
+			}
 		}
 		for _, h := range p.Hooks {
 			k.rows = append(k.rows, new(row).at(l.name, c.chip("hook")).add(plain(" "+h.Event)).
-				at(l.partEnd(h.Event), seg{fitWords("runs "+h.Command, l.inner-l.partEnd(h.Event)), c.dim}))
+				at(l.state, seg{fitWords("runs "+h.Command, l.inner-l.state), c.dim}))
 		}
 		switch p.State {
 		case pluginMissing:
