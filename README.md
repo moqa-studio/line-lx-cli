@@ -129,7 +129,7 @@ hub  hub.example.com
 | `agents[].location` | Optional. Claude Code: the settings file that connects it. Codex and pi: the skills folder. |
 | `agents[].problem` | Optional: what's wrong with the connection |
 | `agents[].marketplace` | Optional, Claude Code only: `{ "name", "fetched", "fetchedAt", "hubFetchedAt" }`. `fetched`: Claude Code has the marketplace in its records. `fetchedAt`: when it last fetched it, from its records. `hubFetchedAt`: when the hub last saw Claude Code fetch it, from any of your machines. |
-| `agents[].plugins[]` | What's installed here by name, then what's missing by name, then the bundle |
+| `agents[].plugins[]` | The hub's plugins in the hub's order, the web app's (so by route), then the ones the hub doesn't have (`not-in-hub`, `other-hub`) by name, then the bundle. Without the hub's answer, by name, then the bundle. |
 | `.name` | The plugin's name |
 | `.bundle` | `true` for Claude Code's `metro-lx`, which brings the workspace's other plugins |
 | `.route` | From the hub: the route number of the plugin's line, 1 to 6, as the web app shows it. `null` for the bundle, a plugin from another hub or no longer in the hub, and with a hub that doesn't give lines. |

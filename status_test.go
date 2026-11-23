@@ -57,16 +57,16 @@ func newStatusHub(t *testing.T) *statusHub {
 	return h
 }
 
-// statusAnswer is the hub's view of the fixture machine's person: notes 1.2.0 (route 1), tools 1.1.0 (route 4)
-// and extra 0.1.0 (route 2) for every agent, and the bundle for Claude Code, with the usage hook.
+// statusAnswer is the hub's view of the fixture machine's person: notes 1.2.0 (route 1), tools 1.1.0 (route 2)
+// and extra 0.1.0 (route 3), in the hub's order, for every agent, and the bundle for Claude Code, with the usage hook.
 func statusAnswer(hub string) string {
 	plugins := func(delivered string) string {
 		return `[
       {"name": "notes", "route": 1, "line": "engineering", "latestVersion": "1.2.0", "deliveredVersion": "` + delivered + `", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-18T09:00:00Z", "behind": false,
        "skills": [{"name": "jot", "description": "Jot a note"}, {"name": "summary", "description": "Sum up the notes of the day"}], "hooks": []},
-      {"name": "tools", "route": 4, "line": "sales", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
+      {"name": "tools", "route": 2, "line": "product", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
        "skills": [{"name": "lint", "description": "Lint the repository"}], "hooks": []},
-      {"name": "extra", "route": 2, "line": "product", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
+      {"name": "extra", "route": 3, "line": "marketing", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
        "skills": [{"name": "help", "description": "Help"}], "hooks": []}`
 	}
 	return `{"workspace": {"slug": "dev", "name": "Dev"}, "hub": "` + hub + `", "agents": [
@@ -296,10 +296,10 @@ hub  HUB
 │   ┃ ●  jot      Jot a note, quickly
 │   ┃ ●  summary  Sum up the notes of the day
 │
-├─ (4) tools     v1.0.0 → v1.1.0  behind · 10 Nov 2026
+├─ (2) tools     v1.0.0 → v1.1.0  behind · 10 Nov 2026
 │   ┃ ●  lint  Lint the repository
 │
-├─ (2) extra     not installed
+├─ (3) extra     not installed
 │   ┃ ●  help  Help
 │
 └─  ◎  metro-lx  13cd9935af1d → a1b2c3d4e5f6  behind · 12 Nov 2026
@@ -309,17 +309,17 @@ hub  HUB
 
 ▌Codex         set up · ~/.codex/skills · synced 2d ago
 │
-├─     an-old-plugin-with-a-long-name  v2.0.0  not in the hub · 1 Sep 2026
-│   ┃ ●  gone
-│
 ├─ (1) notes                           v1.1.0 → v1.2.0  behind · 2d ago
 │   ┃ ●  jot  Jot a note
 │
-├─ (2) extra                           not installed
+├─ (2) tools                           not installed
+│   ┃ ●  lint  Lint the repository
+│
+├─ (3) extra                           not installed
 │   ┃ ●  help  Help
 │
-└─ (4) tools                           not installed
-    ┃ ●  lint  Lint the repository
+└─     an-old-plugin-with-a-long-name  v2.0.0  not in the hub · 1 Sep 2026
+    ┃ ●  gone
   Run ` + "`line-lx sync`" + ` to catch up with the hub.
 
 ▌pi            set up · ~/.pi/agent/skills · synced 2m ago
@@ -328,16 +328,16 @@ hub  HUB
 │   ┃ ●  jot      Jot a note
 │   ┃ ●  summary  Sum up the notes of the day
 │
-├─     theirs  v3.0.0  other hub · 1h ago
-│   ┃    from https://other.example.com
-│   ┃ ●  help-with-everything-that-the-other-hub-has-to-offer
-│   ┃    Helps with what the other hub offers, from start to end
+├─ (2) tools   not installed
+│   ┃ ●  lint  Lint the repository
 │
-├─ (2) extra   not installed
+├─ (3) extra   not installed
 │   ┃ ●  help  Help
 │
-└─ (4) tools   not installed
-    ┃ ●  lint  Lint the repository
+└─     theirs  v3.0.0  other hub · 1h ago
+    ┃    from https://other.example.com
+    ┃ ●  help-with-everything-that-the-other-hub-has-to-offer
+    ┃    Helps with what the other hub offers, from start to end
   Run ` + "`line-lx sync`" + ` to catch up with the hub.
 `
 

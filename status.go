@@ -141,6 +141,7 @@ type hubView struct {
 	agents          map[string]hubAgentView // by target
 	latest          map[string]*string      // every plugin the hub lists, for any agent: its latest version
 	lines           map[string]string       // the plugins the hub puts on a line: their line
+	order           map[string]int          // every plugin the hub lists: its place in the hub's order, the web app's
 }
 
 type hubAgentView struct {
@@ -200,7 +201,8 @@ const (
 // readHubView checks the hub's answer: a plugin or skill whose name isn't a valid one is dropped, a version
 // that isn't one is unknown, and the text that reaches the terminal is cleaned and bounded.
 func readHubView(doc hubInstalled) hubView {
-	v := hubView{status: hubOK, agents: map[string]hubAgentView{}, latest: map[string]*string{}, lines: map[string]string{}}
+	v := hubView{status: hubOK, agents: map[string]hubAgentView{}, latest: map[string]*string{}, lines: map[string]string{},
+		order: map[string]int{}}
 	if validName(doc.Workspace.Slug) {
 		v.workspace = &statusWorkspace{Slug: doc.Workspace.Slug, Name: bounded(doc.Workspace.Name, 200)}
 	}
@@ -223,6 +225,9 @@ func readHubView(doc hubInstalled) hubView {
 				last:      parseTime(p.LastDeliveredAt),
 				skills:    checkedSkills(p.Skills),
 				hooks:     checkedHooks(p.Hooks),
+			}
+			if _, seen := v.order[p.Name]; !seen {
+				v.order[p.Name] = len(v.order)
 			}
 			if v.latest[p.Name] == nil { // listed, with the first version an agent gives
 				v.latest[p.Name] = checkedVersion(p.LatestVersion)
@@ -539,15 +544,17 @@ func mergePlugins(target, hub string, local map[string]localPlugin, hv hubView) 
 		}
 		out = append(out, p)
 	}
-	// What's here first, then what's missing, by name, and the bundle last: it is there for the others.
+	// The hub's plugins in its order, the web app's (so by route), then the ones it doesn't have, by name, and the
+	// bundle last: it is there for the others.
 	rank := func(p statusPlugin) int {
+		i, known := hv.order[p.Name]
 		switch {
 		case p.Bundle:
-			return 2
-		case p.State == pluginMissing:
-			return 1
+			return len(hv.order) + 1
+		case !known || p.State == pluginNotInHub || p.State == pluginOtherHub:
+			return len(hv.order)
 		}
-		return 0
+		return i
 	}
 	slices.SortStableFunc(out, func(a, b statusPlugin) int { return rank(a) - rank(b) })
 	return out
