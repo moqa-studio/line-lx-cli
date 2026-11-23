@@ -63,6 +63,24 @@ func main() {
 	reportUsage.Flags().StringVar(&agentFlag, "agent", "", "the agent that ran it: claude-code")
 	reportUsage.Flags().StringVar(&workspaceFlag, "workspace", "", "the workspace's slug")
 
+	// The hub's session hook runs it when a session starts: it prints one JSON object or nothing, and exits 0.
+	var noticeAgent, noticeWorkspace string
+	var noticeRefresh bool
+	noticeCmd := &cobra.Command{
+		Use:                "notice",
+		Short:              "Say in Claude Code when your plugins have a problem, or were updated: what the hub's session hook runs",
+		Args:               cobra.ArbitraryArgs,
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runNotice(noticeAgent, noticeWorkspace, noticeRefresh, cmd.OutOrStdout())
+		},
+	}
+	noticeCmd.Flags().StringVar(&noticeAgent, "agent", "", "the agent whose session starts: claude-code")
+	noticeCmd.Flags().StringVar(&noticeWorkspace, "workspace", "", "the workspace's slug")
+	// What the notice starts on its own to refresh an expired sign-in, so the hook never holds a refresh.
+	noticeCmd.Flags().BoolVar(&noticeRefresh, "refresh", false, "refresh the sign-in and record the hub's answer for the next session")
+	_ = noticeCmd.Flags().MarkHidden("refresh")
+
 	var jsonFlag bool
 	status := &cobra.Command{
 		Use:   "status",
@@ -100,6 +118,7 @@ func main() {
 		&cobra.Command{Use: "auth-header", Short: "Print your sign-in as an HTTP header: what Claude Code runs to sign in to the hub", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error { return runAuthHeader() }},
 		reportUsage,
+		noticeCmd,
 	)
 
 	if err := root.Execute(); err != nil {

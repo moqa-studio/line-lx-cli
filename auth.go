@@ -187,6 +187,34 @@ func bearer(hub string) (string, error) {
 	return keychainToken(hub)
 }
 
+// errNeedsRefresh: the stored sign-in is usable, but its access token must be refreshed first.
+var errNeedsRefresh = errors.New("the sign-in needs a refresh")
+
+// storedToken is bearer without the network: LINE_LX_TOKEN, or the keychain's access token while it is valid,
+// with the stored sign-in's expiry. errNeedsRefresh when it must be refreshed; keychainToken's errors otherwise.
+// It never refreshes: a refresh rotates the refresh token at the hub, and a caller with a deadline (`notice`)
+// must never risk stopping one half-way, which would leave this machine holding a revoked refresh token.
+func storedToken(hub string) (token string, expiresAt time.Time, err error) {
+	if os.Getenv("LINE_LX_TOKEN") != "" {
+		token, err = bearer(hub)
+		return token, time.Time{}, err
+	}
+	c, err := loadCreds(hub)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if c.Resource != apiResource(hub) {
+		return "", time.Time{}, errNotSignedIn{fmt.Sprintf("Your sign-in to %s is from an earlier line-lx. Run `line-lx login`.", hub), "from an earlier line-lx"}
+	}
+	switch {
+	case !needsRefresh(c, time.Now()):
+		return c.AccessToken, c.ExpiresAt, nil
+	case c.RefreshToken == "":
+		return "", c.ExpiresAt, errExpired
+	}
+	return "", c.ExpiresAt, errNeedsRefresh
+}
+
 // authHeaderWait is how long auth-header waits for the hub: under the 10 s Claude Code gives it.
 const authHeaderWait = 9 * time.Second
 

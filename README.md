@@ -67,14 +67,15 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
 | `line-lx status [--json]` | Shows, for each agent, whether it's connected to the hub, and each plugin it has from the hub: its version, whether it's behind, when it was last updated, its skills with their security review, and its hooks. Changes nothing. See [Status](#status). |
 | `line-lx usage [--month] [--json]` | Shows your own runs of your workspace's plugins over the last 7 days (`--month`: 30), per plugin and per agent. Needs a sign-in. Changes nothing. See [Your usage](#your-usage). |
-| `line-lx doctor` | Checks the hub, your sign-in and each agent, with the fix under each problem. Exit 1 when something is wrong. |
+| `line-lx doctor` | Checks the hub, your sign-in and each agent, with the fix under each problem: Claude Code's connection and version, the plugins it lacks a day after they came out, and Codex and pi against the hub. Exit 1 when something is wrong. |
 | `line-lx auth-header` | Prints your sign-in as one line of JSON, `{"Authorization":"Bearer <token>"}`. Only for Claude Code, which runs it to sign in to the hub. |
 | `line-lx report-usage --agent claude-code --workspace <slug>` | Reports one use of your workspace's plugins to the hub. Only for the hub's Claude Code hook, which gives it the use on stdin. Always exits 0. See [Usage reports](#usage-reports). |
+| `line-lx notice --agent claude-code --workspace <slug>` | Says in Claude Code, when a session starts, what's wrong with your plugins and how to fix it, and which were updated. Only for the hub's Claude Code hook. Prints one JSON object or nothing, and always exits 0. See [Session notices](#session-notices). |
 | `line-lx --version` | Prints the version. |
 
 Agents are used only when found on the machine: Claude Code (`~/.claude` exists, or `claude` is on the PATH), Codex (`~/.codex` exists) and pi (`~/.pi/agent` exists). line-lx only changes folders carrying its stamp, and only for the hub that wrote them.
 
-Every command but `auth-header`, `report-usage` and `completion` prints for people, with one look: the metro-lx mark, then rows of checks (✓ ok, ✗ failed, ! a warning, · nothing to check) with the fix under each problem, or cards. It fits in 80 columns with normal data: names and versions are never cut, so a long one widens its column; other text is cut with "…" or wrapped. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256 colors. Green is kept for what's connected, set up, up to date or ok, and red for what failed. Without color, the shapes and words say the same, and a plugin's route shows in brackets, `(1)`. `sync` shows a spinner on the agent it's working on only on a terminal with color.
+Every command but `auth-header`, `report-usage`, `notice` and `completion` prints for people, with one look: the metro-lx mark, then rows of checks (✓ ok, ✗ failed, ! a warning, · nothing to check) with the fix under each problem, or cards. It fits in 80 columns with normal data: names and versions are never cut, so a long one widens its column; other text is cut with "…" or wrapped. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256 colors. Green is kept for what's connected, set up, up to date or ok, and red for what failed. Without color, the shapes and words say the same, and a plugin's route shows in brackets, `(1)`. `sync` shows a spinner on the agent it's working on only on a terminal with color.
 
 ## Status
 
@@ -98,7 +99,8 @@ Every command but `auth-header`, `report-usage` and `completion` prints for peop
   │        ●  capture                        ✓ No findings                   │
   │                                                                          │
   │   ◎   metro-lx         13cd9935af1d      up to date           yesterday  │
-  │        ▲  PostToolUse                    runs line-lx report-usage…      │
+  │        ▲  SessionStart                   runs line-lx notice             │
+  │        ▲  PostToolUse                    runs line-lx report-usage       │
   │                                                                          │
   │  Claude Code catches up with the hub by itself, in its next session.     │
   │                                                                          │
@@ -230,9 +232,39 @@ Admins can connect Claude Code on every machine with [managed settings](https://
 
 `<slug>` is your workspace's slug (`line-lx whoami`), and `<hub>` your hub's URL. Use the path where your tooling installs line-lx. Claude Code doesn't install the dependencies of `metro-lx` when it starts, so list each plugin in `enabledPlugins` too (`"<plugin>@metro-<slug>": true`), or have people run `line-lx sync`. `line-lx doctor` and `line-lx list` see a marketplace declared in Claude Code's managed settings files (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux), not one from an MDM profile or server-managed settings.
 
+### Session notices
+
+The hub's `metro-lx` plugin carries a Claude Code hook that runs `line-lx notice --agent claude-code --workspace <slug>` when a session starts or resumes. When something is wrong, Claude Code shows you one line, with the fix. When all is well, it shows nothing.
+
+| What's wrong | The fix it gives |
+|---|---|
+| Your line-lx sign-in is missing, expired, from an earlier line-lx, or refused by the hub. Claude Code then gets no updates. | `line-lx login` |
+| Claude Code takes the workspace's plugins from another hub than the one line-lx is signed in to, or its connection to the hub is broken. | `line-lx doctor` |
+| Your sign-in now acts in another workspace than the plugins Claude Code has. | `line-lx sync`, or switch back in the web app |
+| Claude Code is older than 2.1.319, so new plugins don't arrive. | `claude update` |
+| A plugin out for a day or more isn't installed. | `line-lx sync` |
+| A plugin out for a day or more is behind. | Send a message, then `/reload-plugins` |
+
+With several problems, it shows the first in this order and says how many more: `line-lx doctor` lists them all. A plugin you turned off in Claude Code isn't counted.
+
+When a plugin was updated since your last session, it also shows which one and its version, once, and quotes the first line of its changelog as its publisher wrote it:
+
+```text
+Metro-LX · moqa-kit updated to v1.1.0 · its changelog: "Adds the website-creation skill."
+```
+
+- **What it reads.** Your sign-in, Claude Code's records (`plugins/known_marketplaces.json`, `plugins/installed_plugins.json`, each plugin's `.claude-plugin/plugin.json` in its cache) and your user settings, and `claude --version`, run again only when Claude Code's binary changes. From the hub, what `line-lx status` asks: `GET /api/me/installed`, with your sign-in. Nothing else is sent, and the hub records nothing of it.
+- **It never refreshes your sign-in itself.** The hub replaces the refresh token as it answers a refresh, so a refresh stopped half-way would leave this computer with a revoked one, and Claude Code may stop a hook at any time. With a valid access token, it asks the hub at once. With an expired one, it starts `line-lx notice --refresh` as a process of its own, in its own session: it refreshes the sign-in as every command does, however long the hub takes, asks the hub, and records the answer for the next session. This session uses the last answer recorded (at most 3 days old), and still tells what it checks on this computer. When the hub refuses that refresh, the next session says your sign-in expired, until you sign in again.
+- **What it remembers.** `notice.json` in line-lx's config folder, per hub and workspace (16 at most, the least recently used dropped first): each plugin's version it told (200 at most), and the hub's last answer (each plugin's latest version, when it came out, its changelog's first line). Per hub: the workspace your sign-in acts in, and whether the hub refused the last refresh. And Claude Code's version with its binary's path, size and time. No token. It writes it whole (a temporary file, then a rename) under `notice.lock`, so two sessions starting at once tell an update once. The first session for a workspace only remembers. An update is told once the hub's answer knows its version, with its changelog; a version older than the one told is remembered quietly.
+- **Where it shows.** Claude Code shows the line to you, never to Claude: line-lx prints only `{"systemMessage": "…"}`, or nothing, and the hook passes nothing else on. Changelogs and names come from people in your workspace, so they never reach the model, and a changelog is always quoted as its publisher's. Text from the hub loses its escape sequences and control characters, and fits on one line: a changelog line is cut at 120 characters.
+- **Never slower.** It answers within 1.5 seconds with what it knows by then. The hook passes on line-lx's output only when it is one line that starts with `{"systemMessage":` and ends with `}`, and always exits 0. So without line-lx, with a line-lx older than 0.4.3, or when it fails, the session shows nothing at all.
+- **Known limit: sessions without a screen.** Claude Code doesn't tell a hook whether a person sees the session (`claude -p` and the Agent SDK run it too), so an update told in such a session counts as told.
+- **Codex and pi** have no session hook here: `line-lx doctor` says what's behind. `line-lx sync` doesn't print changelogs: agents run it in their shell, and a changelog in its output would reach their model.
+- **Windows.** line-lx is released for macOS and Linux. Claude Code runs hooks with Git Bash on Windows, or PowerShell without it, where the hook's shell form fails.
+
 ### Usage reports
 
-When an admin turns on agent reporting for the workspace, the hub's `metro-lx` plugin carries a Claude Code hook. It runs `line-lx report-usage --agent claude-code --workspace <slug>` in the background each time Claude runs a skill or an MCP tool of a plugin, and each time you type a skill. While reporting is off, the plugin has no hook and nothing is sent.
+When an admin turns on agent reporting for the workspace, the hub's `metro-lx` plugin also carries a reporting hook. It runs `line-lx report-usage --agent claude-code --workspace <slug>` in the background each time Claude runs a skill or an MCP tool of a plugin, and each time you type a skill. While reporting is off, the plugin has no reporting hook and nothing is reported.
 
 A report says only which plugin and version, which skill or MCP tool, the kind of use (`activated`, `mcp_call` or `failed`), who started it (`person` or `agent`) and whether it succeeded:
 
@@ -256,7 +288,7 @@ Two environment variables, for CI and managed machines:
 ## Where it stores things
 
 - **Sign-in**: tokens for the hub's API (resource `<hub>/api`), in the OS keychain, service `line-lx`, one entry per hub URL. On macOS, any process running as you can read this item. On Linux without a Secret Service on D-Bus (SSH boxes, containers), the sign-in goes to `<config dir>/line-lx/credentials/<hub id>.json`, mode 0600 in a 0700 folder.
-- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json`, the sync lock in `sync.lock`, and, after a usage report was dropped, `usage-dropped.json`: a count and the time of the first drop, nothing else. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
+- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json`, the sync lock in `sync.lock`, the session notice's `notice.json`, `notice.lock` and `refresh.lock` (see [Session notices](#session-notices)), and, after a usage report was dropped, `usage-dropped.json`: a count and the time of the first drop, nothing else. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
 - **Plugins**: Codex in `~/.codex/skills/<plugin>--<skill>/`, with records in `~/.codex/skills/.line-lx/`. pi in `~/.pi/agent/skills/<plugin>/<skill>/`. Claude Code keeps its own, installed from the hub's marketplace (see [Claude Code](#claude-code)).
 
 ## Build from source

@@ -142,6 +142,8 @@ type hubInstalled struct {
 			Route            *int         `json:"route"` // an older hub doesn't send it
 			Line             *string      `json:"line"`
 			LatestVersion    *string      `json:"latestVersion"`
+			LatestPublished  *string      `json:"latestPublishedAt"` // an older hub doesn't send it
+			Changelog        *string      `json:"changelog"`         // the latest version's, as its publisher wrote it
 			DeliveredVersion *string      `json:"deliveredVersion"`
 			FirstDeliveredAt *string      `json:"firstDeliveredAt"`
 			LastDeliveredAt  *string      `json:"lastDeliveredAt"`
@@ -178,6 +180,8 @@ type hubAgentView struct {
 type hubPluginView struct {
 	latest, delivered *string
 	first, last       *time.Time
+	published         *time.Time // when the latest version was published
+	changelog         string     // its changelog's first line, cleaned and bounded (changelogLine)
 	skills            []statusSkill
 	hooks             []statusHook
 }
@@ -269,6 +273,8 @@ func readHubView(doc hubInstalled) hubView {
 				delivered: checkedVersion(p.DeliveredVersion),
 				first:     parseTime(p.FirstDeliveredAt),
 				last:      parseTime(p.LastDeliveredAt),
+				published: parseTime(p.LatestPublished),
+				changelog: changelogLine(p.Changelog),
 				skills:    checkedSkills(p.Skills),
 				hooks:     checkedHooks(p.Hooks),
 			}
@@ -1016,7 +1022,7 @@ func agentCard(a statusAgent, l statusLayout, now time.Time, c painter) card {
 		}
 		for _, h := range p.Hooks {
 			k.rows = append(k.rows, new(row).at(l.name, c.chip("hook")).add(plain(" "+h.Event)).
-				at(l.state, seg{fitWords("runs "+h.Command, l.inner-l.state), c.dim}))
+				at(l.state, seg{fitWords(hookRuns(h.Command), l.inner-l.state), c.dim}))
 		}
 		switch p.State {
 		case pluginMissing:

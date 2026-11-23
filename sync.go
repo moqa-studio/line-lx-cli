@@ -562,6 +562,18 @@ func doctorChecks(hub string) []doctorCheck {
 				add(doctorCheck{kind: checkOK, label: name, text: version, more: " · " + minClaudeVersion + " or later"})
 			}
 		}
+		// A warning, as in the session notice: plugins out for a day that Claude Code still lacks.
+		if rels != nil && market != "" {
+			if hv := askInstalled(api); hv.status == hubOK && hv.workspace != nil {
+				slug := hv.workspace.Slug
+				if missing, behind := noticeLag(hub, slug, hv, readClaudeLocal(hub, slug), turnedOff(market)); len(missing) > 0 {
+					add(doctorCheck{kind: checkWarn, label: name, text: plural(len(missing), "plugin") + " not installed for over a day", more: " · " + names(missing), fix: "Run `line-lx sync`."})
+				} else if len(behind) > 0 {
+					add(doctorCheck{kind: checkWarn, label: name, text: plural(len(behind), "plugin") + " behind for over a day", more: " · " + names(behind),
+						fix: "Send a message in Claude Code: it updates within 10 minutes. Then run `/reload-plugins`."})
+				}
+			}
+		}
 		// A warning: the next report that reaches the hub clears it.
 		if msg := droppedText(readDropped()); msg != "" {
 			text, fix, _ := strings.Cut(msg, ". ")

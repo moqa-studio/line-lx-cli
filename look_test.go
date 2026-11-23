@@ -68,8 +68,8 @@ const statusGolden = `
   │                                              1 high                      │
   │                                                                          │
   │   ◎   metro-lx   13cd9935af1d              behind           12 Nov 2026  │
-  │        ▲  PostToolUse                      runs line-lx report-usage…    │
-  │        ▲  PostToolUseFailure               runs line-lx report-usage…    │
+  │        ▲  PostToolUse                      runs line-lx report-usage     │
+  │        ▲  PostToolUseFailure               runs line-lx report-usage     │
   │                                                                          │
   │  Run ` + "`" + `line-lx sync` + "`" + `, or start Claude Code, to install what's missing.    │
   │                                                                          │

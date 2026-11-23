@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-23
+
+### Added
+
+- `notice --agent claude-code --workspace <slug>` tells you in Claude Code, when a session starts or resumes, what's wrong with your plugins, with the fix: a sign-in that is missing, expired, from an earlier line-lx or refused by the hub, a Claude Code connection to another hub or a broken one, a sign-in acting in another workspace, a Claude Code older than 2.1.319, a plugin out for a day or more that isn't installed or is behind. One line, the first problem, and how many more. Nothing when all is well. It also tells, once, which plugins were updated since your last session, quoting the first line of their changelog as their publisher's. The hub's `metro-lx` plugin runs it in a session hook. It prints only `{"systemMessage": "…"}`, which Claude Code shows you and never gives Claude, or nothing, and always exits 0. It answers within 1.5 seconds. It never refreshes the sign-in itself: with an expired one, it starts `notice --refresh` as a process of its own, which refreshes it however long the hub takes and records the hub's answer for the next session, so a slow hub can never leave a half-done refresh. It asks the hub what `status` asks, and sends nothing else. It remembers what it told in `notice.json`, in line-lx's config folder, per hub and workspace. See [Session notices](README.md#session-notices).
+- `doctor` warns when Claude Code lacks a plugin, or has it in an older version, a day after it came out.
+
+### Changed
+
+- `status` shows what a hook of line-lx's runs as `runs line-lx <command>`.
+
 ## [0.4.2] - 2026-11-23
 
 ### Added
@@ -95,7 +106,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...v0.4.0
