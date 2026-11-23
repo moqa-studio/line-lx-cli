@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -127,23 +126,7 @@ func needsRefresh(c *creds, now time.Time) bool {
 
 // keychainToken returns a valid access token for the hub from the keychain, refreshing it when needed.
 // With a still-valid token it makes no network call.
-func keychainToken(hub string) (string, error) { return watchedToken(hub, nil) }
-
-// Refresh gate states: a caller with a deadline closes the gate before it stops.
-const (
-	gateOpen    int32 = iota // a refresh may start
-	gateRefresh              // a refresh is under way: from the request to the saved sign-in
-	gateClosed               // no refresh may start
-)
-
-// errGateClosed: the caller stopped before the refresh started.
-var errGateClosed = errors.New("line-lx stopped before refreshing the sign-in")
-
-// watchedToken is keychainToken for a caller with a deadline (`notice`), through gate when not nil. The hub
-// rotates the refresh token as it answers, so a refresh dropped half-way would leave this machine holding a
-// revoked one. So a refresh starts only while the gate is open, and holds it from the request until the new
-// sign-in is saved; the caller closes it (closeGate) before it stops, which waits for a refresh under way.
-func watchedToken(hub string, gate *atomic.Int32) (string, error) {
+func keychainToken(hub string) (string, error) {
 	c, err := loadCreds(hub)
 	if err != nil {
 		return "", err
@@ -163,12 +146,6 @@ func watchedToken(hub string, gate *atomic.Int32) (string, error) {
 	oauth, err := discover(hub)
 	if err != nil {
 		return "", err
-	}
-	if gate != nil {
-		if !gate.CompareAndSwap(gateOpen, gateRefresh) {
-			return "", errGateClosed
-		}
-		defer gate.Store(gateOpen)
 	}
 	fresh, err := requestToken(oauth.TokenEndpoint, url.Values{
 		"grant_type":    {"refresh_token"},
@@ -197,25 +174,7 @@ func watchedToken(hub string, gate *atomic.Int32) (string, error) {
 
 // bearer is the token every command uses: LINE_LX_TOKEN (CI) wins over the keychain, but only for the
 // hub LINE_LX_HUB names, so the token never goes to another hub (`line-lx setup --hub`).
-func bearer(hub string) (string, error) { return watchedBearer(hub, nil) }
-
-// closeGate closes a refresh gate, waiting at most until `until` for a refresh under way to end. False when one
-// still runs then.
-func closeGate(gate *atomic.Int32, until time.Time) bool {
-	for !gate.CompareAndSwap(gateOpen, gateClosed) {
-		if gate.Load() == gateClosed {
-			return true
-		}
-		if time.Now().After(until) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return true
-}
-
-// watchedBearer is bearer, through watchedToken's gate.
-func watchedBearer(hub string, gate *atomic.Int32) (string, error) {
+func bearer(hub string) (string, error) {
 	if t := os.Getenv("LINE_LX_TOKEN"); t != "" {
 		if os.Getenv("LINE_LX_HUB") == "" {
 			return "", errors.New("LINE_LX_TOKEN needs LINE_LX_HUB, so the token only goes to the hub it belongs to.")
@@ -225,7 +184,35 @@ func watchedBearer(hub string, gate *atomic.Int32) (string, error) {
 		}
 		return t, nil
 	}
-	return watchedToken(hub, gate)
+	return keychainToken(hub)
+}
+
+// errNeedsRefresh: the stored sign-in is usable, but its access token must be refreshed first.
+var errNeedsRefresh = errors.New("the sign-in needs a refresh")
+
+// storedToken is bearer without the network: LINE_LX_TOKEN, or the keychain's access token while it is valid,
+// with the stored sign-in's expiry. errNeedsRefresh when it must be refreshed; keychainToken's errors otherwise.
+// It never refreshes: a refresh rotates the refresh token at the hub, and a caller with a deadline (`notice`)
+// must never risk stopping one half-way, which would leave this machine holding a revoked refresh token.
+func storedToken(hub string) (token string, expiresAt time.Time, err error) {
+	if os.Getenv("LINE_LX_TOKEN") != "" {
+		token, err = bearer(hub)
+		return token, time.Time{}, err
+	}
+	c, err := loadCreds(hub)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if c.Resource != apiResource(hub) {
+		return "", time.Time{}, errNotSignedIn{fmt.Sprintf("Your sign-in to %s is from an earlier line-lx. Run `line-lx login`.", hub), "from an earlier line-lx"}
+	}
+	switch {
+	case !needsRefresh(c, time.Now()):
+		return c.AccessToken, c.ExpiresAt, nil
+	case c.RefreshToken == "":
+		return "", c.ExpiresAt, errExpired
+	}
+	return "", c.ExpiresAt, errNeedsRefresh
 }
 
 // authHeaderWait is how long auth-header waits for the hub: under the 10 s Claude Code gives it.

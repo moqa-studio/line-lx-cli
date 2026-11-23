@@ -63,7 +63,7 @@ Each archive also has an SBOM in the release, `<archive>.sbom.json`.
 | `line-lx login [--hub URL]` | Signs in through the browser. `--hub` is remembered for the next commands. |
 | `line-lx logout` | Revokes the refresh token at the hub (best effort) and forgets this machine's sign-in. |
 | `line-lx whoami` | Shows you, your workspace, your role and the hub. |
-| `line-lx sync` | Writes the newest version of each plugin to Codex and pi, with what's new in it (the first line of its changelog), removes the ones gone from the hub, and reports each delivery to the hub. Connects Claude Code to the hub. Exit 1 if a target failed or no agent is found. |
+| `line-lx sync` | Writes the newest version of each plugin to Codex and pi, removes the ones gone from the hub, and reports each delivery to the hub. Connects Claude Code to the hub. Exit 1 if a target failed or no agent is found. |
 | `line-lx list` | Shows the plugins installed here per agent, and whether they're up to date. |
 | `line-lx status [--json]` | Shows, for each agent, whether it's connected to the hub, and each plugin it has from the hub: its version, whether it's behind, when it was last updated, its skills with their security review, and its hooks. Changes nothing. See [Status](#status). |
 | `line-lx usage [--month] [--json]` | Shows your own runs of your workspace's plugins over the last 7 days (`--month`: 30), per plugin and per agent. Needs a sign-in. Changes nothing. See [Your usage](#your-usage). |
@@ -247,17 +247,19 @@ The hub's `metro-lx` plugin carries a Claude Code hook that runs `line-lx notice
 
 With several problems, it shows the first in this order and says how many more: `line-lx doctor` lists them all. A plugin you turned off in Claude Code isn't counted.
 
-When a plugin was updated since your last session, it also shows which one, its version and the first line of its changelog, once:
+When a plugin was updated since your last session, it also shows which one and its version, once, and quotes the first line of its changelog as its publisher wrote it:
 
 ```text
-Metro-LX updated moqa-kit to v1.1.0: Adds the website-creation skill.
+Metro-LX · moqa-kit updated to v1.1.0 · its changelog: "Adds the website-creation skill."
 ```
 
 - **What it reads.** Your sign-in, Claude Code's records (`plugins/known_marketplaces.json`, `plugins/installed_plugins.json`, each plugin's `.claude-plugin/plugin.json` in its cache) and your user settings, and `claude --version`, run again only when Claude Code's binary changes. From the hub, what `line-lx status` asks: `GET /api/me/installed`, with your sign-in. Nothing else is sent, and the hub records nothing of it.
-- **What it remembers.** `notice.json` in line-lx's config folder: the hub, the workspace, each plugin's version at your last session (at most 500), and Claude Code's version with its binary's path, size and time. It writes it whole (a temporary file, then a rename) under `notice.lock`, so two sessions starting at once tell an update once. The first session only remembers. Without the hub's answer, an update waits for the next session, to be told with its changelog.
-- **Where it shows.** Claude Code shows the line to you, never to Claude: line-lx prints only `{"systemMessage": "…"}`, or nothing. Changelogs and names come from people in your workspace, so they never reach the model. Text from the hub loses its escape sequences and control characters, and fits on one line: a changelog line is cut at 120 characters.
-- **Never slower.** It answers within 1.5 seconds with what it knows by then. The one thing it waits for past that is a sign-in refresh under way, at most 2.5 seconds more, so it ends before the hook's 5-second limit: the hub replaces the refresh token as it answers, and stopping half-way would leave this machine with the old one. The hook runs it as `out=$(line-lx notice … 2>/dev/null) && printf '%s' "$out"; exit 0`, so without line-lx, with a line-lx older than 0.4.3, or when it fails, the session shows nothing at all.
-- **Codex and pi** have no session hook here: `line-lx sync` shows what's new in each version it writes, and `line-lx doctor` what's behind.
+- **It never refreshes your sign-in itself.** The hub replaces the refresh token as it answers a refresh, so a refresh stopped half-way would leave this computer with a revoked one, and Claude Code may stop a hook at any time. With a valid access token, it asks the hub at once. With an expired one, it starts `line-lx notice --refresh` as a process of its own, in its own session: it refreshes the sign-in as every command does, however long the hub takes, asks the hub, and records the answer for the next session. This session uses the last answer recorded (at most 3 days old), and still tells what it checks on this computer. When the hub refuses that refresh, the next session says your sign-in expired, until you sign in again.
+- **What it remembers.** `notice.json` in line-lx's config folder, per hub and workspace (16 at most, the least recently used dropped first): each plugin's version it told (200 at most), and the hub's last answer (each plugin's latest version, when it came out, its changelog's first line). Per hub: the workspace your sign-in acts in, and whether the hub refused the last refresh. And Claude Code's version with its binary's path, size and time. No token. It writes it whole (a temporary file, then a rename) under `notice.lock`, so two sessions starting at once tell an update once. The first session for a workspace only remembers. An update is told once the hub's answer knows its version, with its changelog; a version older than the one told is remembered quietly.
+- **Where it shows.** Claude Code shows the line to you, never to Claude: line-lx prints only `{"systemMessage": "…"}`, or nothing, and the hook passes nothing else on. Changelogs and names come from people in your workspace, so they never reach the model, and a changelog is always quoted as its publisher's. Text from the hub loses its escape sequences and control characters, and fits on one line: a changelog line is cut at 120 characters.
+- **Never slower.** It answers within 1.5 seconds with what it knows by then. The hook runs it as `out=$(line-lx notice … 2>/dev/null) && case "$out" in '{"systemMessage":'*) printf '%s' "$out";; esac; exit 0`, so without line-lx, with a line-lx older than 0.4.3, or when it fails, the session shows nothing at all.
+- **Known limit: sessions without a screen.** Claude Code doesn't tell a hook whether a person sees the session (`claude -p` and the Agent SDK run it too), so an update told in such a session counts as told.
+- **Codex and pi** have no session hook here: `line-lx doctor` says what's behind. `line-lx sync` doesn't print changelogs: agents run it in their shell, and a changelog in its output would reach their model.
 - **Windows.** line-lx is released for macOS and Linux. Claude Code runs hooks with Git Bash on Windows, or PowerShell without it, where the hook's shell form fails.
 
 ### Usage reports
@@ -286,7 +288,7 @@ Two environment variables, for CI and managed machines:
 ## Where it stores things
 
 - **Sign-in**: tokens for the hub's API (resource `<hub>/api`), in the OS keychain, service `line-lx`, one entry per hub URL. On macOS, any process running as you can read this item. On Linux without a Secret Service on D-Bus (SSH boxes, containers), the sign-in goes to `<config dir>/line-lx/credentials/<hub id>.json`, mode 0600 in a 0700 folder.
-- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json`, the sync lock in `sync.lock`, the session notice's `notice.json` and `notice.lock` (see [Session notices](#session-notices)), and, after a usage report was dropped, `usage-dropped.json`: a count and the time of the first drop, nothing else. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
+- **Config**: `<config dir>/line-lx/`, with the current hub in `config.json`, the sync lock in `sync.lock`, the session notice's `notice.json`, `notice.lock` and `refresh.lock` (see [Session notices](#session-notices)), and, after a usage report was dropped, `usage-dropped.json`: a count and the time of the first drop, nothing else. The config dir is `~/Library/Application Support` on macOS and `~/.config` (or `$XDG_CONFIG_HOME`) on Linux.
 - **Plugins**: Codex in `~/.codex/skills/<plugin>--<skill>/`, with records in `~/.codex/skills/.line-lx/`. pi in `~/.pi/agent/skills/<plugin>/<skill>/`. Claude Code keeps its own, installed from the hub's marketplace (see [Claude Code](#claude-code)).
 
 ## Build from source
