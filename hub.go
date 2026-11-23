@@ -84,9 +84,10 @@ type skill struct {
 }
 
 type pluginVersion struct {
-	ID       string `json:"id"`
-	Version  string `json:"version"`
-	Snapshot struct {
+	ID        string `json:"id"`
+	Version   string `json:"version"`
+	Changelog string `json:"changelog"` // as its publisher wrote it: shown cleaned, its first line only
+	Snapshot  struct {
 		Skills []skill `json:"skills"`
 	} `json:"snapshot"`
 }

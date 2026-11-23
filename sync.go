@@ -33,6 +33,7 @@ type pluginChange struct {
 	from          string // the version it replaced; "" when the agent didn't have it
 	action        string // added, updated, removed or failed
 	detail        string // why it failed, or what the agent couldn't take
+	changelog     string // what's new in the version written, its changelog's first line (changelogLine)
 }
 
 func runSync() error {
@@ -136,6 +137,8 @@ func syncAll(api *hubClient) ([]*agentResult, error) {
 			if had && before.Hub == api.hub {
 				ch.action, ch.from = "updated", clean(before.Version)
 			}
+			// What's new, said once: when line-lx writes the version.
+			ch.changelog = changelogLine(&r.version.Changelog)
 			status, errMsg := "delivered", ""
 			switch {
 			case werr != nil:
@@ -279,6 +282,9 @@ func changeRows(changes []pluginChange, lines map[string]string, c painter) []st
 			r.at(action, plain(ch.action))
 		}
 		out = append(out, r.String())
+		if ch.changelog != "" && (ch.action == "added" || ch.action == "updated" && ch.from != ch.version) {
+			out = append(out, noteRow(c, at, ch.changelog)...)
+		}
 		if ch.detail != "" {
 			out = append(out, noteRow(c, at, ch.detail)...)
 		}
@@ -560,6 +566,18 @@ func doctorChecks(hub string) []doctorCheck {
 				add(doctorCheck{kind: checkWarn, label: name, text: outdatedText(version), fix: claudeUpdate})
 			default:
 				add(doctorCheck{kind: checkOK, label: name, text: version, more: " · " + minClaudeVersion + " or later"})
+			}
+		}
+		// A warning, as in the session notice: plugins out for a day that Claude Code still lacks.
+		if rels != nil && market != "" {
+			if hv := askInstalled(api); hv.status == hubOK && hv.workspace != nil {
+				f := noticeFacts{hub: hub, slug: hv.workspace.Slug, hv: hv, now: time.Now(), local: readClaudeLocal(hub, hv.workspace.Slug), off: turnedOff(market)}
+				if missing, behind := claudeLag(f); len(missing) > 0 {
+					add(doctorCheck{kind: checkWarn, label: name, text: plural(len(missing), "plugin") + " not installed for over a day", more: " · " + names(missing), fix: "Run `line-lx sync`."})
+				} else if len(behind) > 0 {
+					add(doctorCheck{kind: checkWarn, label: name, text: plural(len(behind), "plugin") + " behind for over a day", more: " · " + names(behind),
+						fix: "Send a message in Claude Code: it updates within 10 minutes. Then run `/reload-plugins`."})
+				}
 			}
 		}
 		// A warning: the next report that reaches the hub clears it.
