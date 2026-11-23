@@ -49,7 +49,7 @@ func syncLock() (unlock func(), err error) {
 			f.Close()
 			return nil, errors.New("Another line-lx is syncing this machine. Run this again once it's done.")
 		case !waiting:
-			fmt.Println("Waiting for another line-lx on this machine to finish its sync…")
+			fmt.Println("  Waiting for another line-lx on this machine to finish its sync…")
 			waiting = true
 		}
 		time.Sleep(200 * time.Millisecond)

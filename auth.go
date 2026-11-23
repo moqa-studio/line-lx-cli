@@ -28,12 +28,13 @@ const defaultHub = "https://metro-lx-moqastudio-e1425ede.koyeb.app"
 // The keychain holds one entry per hub (account = hub URL), so a cloud and a self-hosted hub coexist.
 const keychainService = "line-lx"
 
-// errNotSignedIn: the keychain has no usable sign-in for the hub, so `line-lx login` is the fix.
-type errNotSignedIn struct{ msg string }
+// errNotSignedIn: the keychain has no usable sign-in for the hub, so `line-lx login` is the fix. why says what's
+// wrong with it in a few words, for doctor's row.
+type errNotSignedIn struct{ msg, why string }
 
 func (e errNotSignedIn) Error() string { return e.msg }
 
-var errExpired = errNotSignedIn{"Your session expired. Run `line-lx login`."}
+var errExpired = errNotSignedIn{"Your session expired. Run `line-lx login`.", "expired"}
 
 type creds struct {
 	ClientID     string    `json:"client_id"`
@@ -99,14 +100,14 @@ func saveHub(hub string) error {
 func loadCreds(hub string) (*creds, error) {
 	raw, err := credGet(hub)
 	if errors.Is(err, keyring.ErrNotFound) {
-		return nil, errNotSignedIn{fmt.Sprintf("Not signed in to %s. Run `line-lx login`.", hub)}
+		return nil, errNotSignedIn{fmt.Sprintf("Not signed in to %s. Run `line-lx login`.", hub), "not signed in"}
 	}
 	if err != nil {
 		return nil, err
 	}
 	var c creds
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
-		return nil, errNotSignedIn{fmt.Sprintf("The stored sign-in for %s is unreadable. Run `line-lx login`.", hub)}
+		return nil, errNotSignedIn{fmt.Sprintf("The stored sign-in for %s is unreadable. Run `line-lx login`.", hub), "unreadable"}
 	}
 	return &c, nil
 }
@@ -132,7 +133,7 @@ func keychainToken(hub string) (string, error) {
 	}
 	// Earlier versions signed in for the hub's MCP server, whose tokens the API refuses.
 	if c.Resource != apiResource(hub) {
-		return "", errNotSignedIn{fmt.Sprintf("Your sign-in to %s is from an earlier line-lx. Run `line-lx login`.", hub)}
+		return "", errNotSignedIn{fmt.Sprintf("Your sign-in to %s is from an earlier line-lx. Run `line-lx login`.", hub), "from an earlier line-lx"}
 	}
 	if !needsRefresh(c, time.Now()) {
 		return c.AccessToken, nil
@@ -372,6 +373,8 @@ func runLogin(hubFlag string) error {
 	if err != nil {
 		return err
 	}
+	writeHeader(os.Stdout, colorDepth(os.Stdout), []seg{plain("login")}, nil)
+	fmt.Println()
 	_, err = login(hub)
 	return err
 }
@@ -417,11 +420,16 @@ func login(hub string) (*me, error) {
 	go func() { _ = server.Serve(listener) }()
 	defer server.Shutdown(context.Background())
 
-	fmt.Printf("Opening your browser to sign in. If it doesn't open, visit:\n%s\n", authURL)
+	p := colorDepth(os.Stdout)
+	// The URL on a line of its own, whole, so it can be copied.
+	fmt.Printf("  Opening your browser to sign in. If it doesn't open, visit:\n  %s\n", authURL)
 	if remoteSession() {
 		// The hub sends the browser back to 127.0.0.1 on this machine, which a browser elsewhere can't reach.
-		fmt.Printf("On a remote machine, the browser must reach this machine's port %d: on your computer, run\n"+
-			"  ssh -N -L %d:127.0.0.1:%d <this machine>\nthen open the URL above there.\n", port, port, port)
+		for _, line := range paragraph(2, seg{fmt.Sprintf("On a remote machine, the browser must reach this machine's port %d: on your computer, run", port), p.dim}) {
+			fmt.Println(line)
+		}
+		fmt.Printf("    ssh -N -L %d:127.0.0.1:%d <this machine>\n", port, port)
+		fmt.Println("  " + p.dim("then open the URL above there."))
 	}
 	openBrowser(authURL)
 
@@ -464,8 +472,15 @@ func login(hub string) (*me, error) {
 	if err := api.do("GET", "/api/me", nil, &m); err != nil {
 		return nil, err
 	}
-	fmt.Printf("Signed in as %s %s · workspace %s · %s\n", clean(m.User.Name), clean(m.User.Email), clean(m.Org.Name), hub)
+	fmt.Println()
+	printLines(signInRow(&m, hub, p))
 	return &m, nil
+}
+
+// signInRow is a sign-in that worked, for people: who, in which workspace, on which hub.
+func signInRow(m *me, hub string, c painter) []string {
+	return checkRow(c, checkOK, "Sign-in", plain(clean(m.User.Name)), seg{" " + clean(m.User.Email), c.dim},
+		plain(" · "+clean(m.Org.Name)), seg{" · " + hostOf(hub), c.dim})
 }
 
 // remoteSession guesses that the browser runs on another machine: line-lx runs over SSH, or on Linux
@@ -516,17 +531,20 @@ func runLogout() error {
 	if err != nil {
 		return err
 	}
+	p := colorDepth(os.Stdout)
+	writeHeader(os.Stdout, p, []seg{plain("logout")}, nil)
+	fmt.Println()
 	// Forget the sign-in first, so being offline never keeps it; then revoke what's in memory.
 	c, _ := loadCreds(hub)
 	err = credDelete(hub)
 	if errors.Is(err, keyring.ErrNotFound) {
-		fmt.Printf("Not signed in to %s.\n", hub)
+		fmt.Println(new(row).at(2, p.mark(checkNone)).at(5, plain("Not signed in to "+hostOf(hub)+".")).String())
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Signed out of %s.\n", hub)
+	fmt.Println(new(row).at(2, p.mark(checkOK)).at(5, plain("Signed out of "+hostOf(hub)+".")).String())
 	if c != nil && c.RefreshToken != "" {
 		if oauth, err := discover(hub); err == nil {
 			revoke(oauth, c)

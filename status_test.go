@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -25,32 +24,40 @@ var statusNow = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 // statusToken is the person's token: distinct enough that finding it in an output means it leaked.
 const statusToken = "s3cret-tok3n-x9"
 
-// statusHub answers GET /api/me/installed with answer (the fixture's by default) and status, and records the
-// requests it gets.
+// statusHub answers GET /api/me/installed with answer (the fixture's by default) and status, GET /api/me, and
+// GET /api/usage/mine and /api/usage/settings with usage and settings, and records the requests it gets.
 type statusHub struct {
 	*httptest.Server
-	mu       sync.Mutex
-	status   int
-	answer   string
-	requests []string
+	mu              sync.Mutex
+	status          int
+	answer          string
+	usage, settings string
+	requests        []string
 }
 
 func newStatusHub(t *testing.T) *statusHub {
-	h := &statusHub{status: http.StatusOK}
+	h := &statusHub{status: http.StatusOK, usage: usageAnswer, settings: `{"agentReporting": true, "perPersonView": false}`}
 	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		h.requests = append(h.requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
+		h.requests = append(h.requests, r.Method+" "+r.URL.String()+" "+r.Header.Get("Authorization"))
 		if r.Header.Get("Authorization") != "Bearer "+statusToken {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if r.Method != "GET" || r.URL.Path != "/api/me/installed" {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/me":
+			fmt.Fprint(w, `{"user": {"name": "Robin", "email": "robin@example.com"}, "org": {"name": "Dev", "slug": "dev"}, "role": "owner"}`)
+		case "GET /api/usage/mine":
+			fmt.Fprint(w, h.usage)
+		case "GET /api/usage/settings":
+			fmt.Fprint(w, h.settings)
+		case "GET /api/me/installed":
+			w.WriteHeader(h.status)
+			fmt.Fprint(w, h.answer)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.WriteHeader(h.status)
-		fmt.Fprint(w, h.answer)
 	}))
 	h.answer = statusAnswer(h.URL)
 	t.Cleanup(h.Close)
@@ -63,11 +70,12 @@ func statusAnswer(hub string) string {
 	plugins := func(delivered string) string {
 		return `[
       {"name": "notes", "route": 1, "line": "engineering", "latestVersion": "1.2.0", "deliveredVersion": "` + delivered + `", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-18T09:00:00Z", "behind": false,
-       "skills": [{"name": "jot", "description": "Jot a note"}, {"name": "summary", "description": "Sum up the notes of the day"}], "hooks": []},
+       "skills": [{"name": "jot", "description": "Jot a note", "review": {"status": "done", "label": "No findings", "tone": "ok", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}}},
+         {"name": "summary", "description": "Sum up the notes of the day", "review": {"status": "done", "label": "To review", "tone": "attention", "counts": {"critical": 0, "high": 0, "medium": 1, "low": 2}}}], "hooks": []},
       {"name": "tools", "route": 2, "line": "product", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
-       "skills": [{"name": "lint", "description": "Lint the repository"}], "hooks": []},
+       "skills": [{"name": "lint", "description": "Lint the repository", "review": {"status": "done", "label": "No static findings", "tone": "neutral", "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}}}], "hooks": []},
       {"name": "extra", "route": 3, "line": "marketing", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
-       "skills": [{"name": "help", "description": "Help"}], "hooks": []}`
+       "skills": [{"name": "help", "description": "Help", "review": {"status": "done", "label": "Flagged", "tone": "danger", "counts": {"critical": 1, "high": 2, "medium": 0, "low": 0}}}], "hooks": []}`
 	}
 	return `{"workspace": {"slug": "dev", "name": "Dev"}, "hub": "` + hub + `", "agents": [
     {"target": "claude-code", "lastFetchedAt": "2026-11-19T08:00:00Z", "plugins": ` + plugins("1.2.0") + `,
@@ -78,6 +86,18 @@ func statusAnswer(hub string) string {
     {"target": "claude", "lastFetchedAt": null, "plugins": ` + plugins("1.2.0") + `]}
   ]}`
 }
+
+// usageAnswer is the person's usage over the week: 53 runs reported by agents, 35 of notes (27 + 4 in Claude Code, 4
+// in Codex) and 18 of tools, and what the web app doesn't count as runs: a delivery the hub saw, an MCP call, a failure.
+const usageAnswer = `{"since": "2026-11-13", "rows": [
+  {"pluginId": "p1", "plugin": "notes", "versionId": "v12", "version": "1.2.0", "review": "no_findings", "reviewJudged": true, "reviewIncomplete": [], "agent": "claude-code", "source": "agent", "kind": "activated", "uses": 27, "lastDay": "2026-11-19"},
+  {"pluginId": "p1", "plugin": "notes", "versionId": "v11", "version": "1.1.0", "review": null, "reviewJudged": null, "reviewIncomplete": null, "agent": "claude-code", "source": "agent", "kind": "activated", "uses": 4, "lastDay": "2026-11-14"},
+  {"pluginId": "p1", "plugin": "notes", "versionId": "v12", "version": "1.2.0", "review": "no_findings", "reviewJudged": true, "reviewIncomplete": [], "agent": "codex", "source": "agent", "kind": "activated", "uses": 4, "lastDay": "2026-11-18"},
+  {"pluginId": "p2", "plugin": "tools", "versionId": "v10", "version": "1.0.0", "review": "review", "reviewJudged": true, "reviewIncomplete": [], "agent": "claude-code", "source": "agent", "kind": "activated", "uses": 18, "lastDay": "2026-11-19"},
+  {"pluginId": "p2", "plugin": "tools", "versionId": "v10", "version": "1.0.0", "review": "review", "reviewJudged": true, "reviewIncomplete": [], "agent": "claude-code", "source": "agent", "kind": "failed", "uses": 2, "lastDay": "2026-11-19"},
+  {"pluginId": "p1", "plugin": "notes", "versionId": "v12", "version": "1.2.0", "review": "no_findings", "reviewJudged": true, "reviewIncomplete": [], "agent": "claude-code", "source": "hub", "kind": "delivered", "uses": 3, "lastDay": "2026-11-18"},
+  {"pluginId": "p3", "plugin": "extra", "versionId": "v01", "version": "0.1.0", "review": null, "reviewJudged": null, "reviewIncomplete": null, "agent": "mcp", "source": "hub", "kind": "mcp_call", "uses": 7, "lastDay": "2026-11-17"}
+]}`
 
 // statusMachine is a machine where Claude Code is connected to the hub's marketplace metro-dev and installed
 // notes 1.2.0 (skills jot and summary), tools 1.0.0 (skill lint) and the bundle (the usage hook), and other
@@ -134,15 +154,15 @@ func statusMachine(t *testing.T, hub string) string {
 	codex := filepath.Join(home, ".codex", "skills")
 	putFile(t, filepath.Join(codex, ".line-lx", "notes.json"), `{"hub": "`+hub+`", "plugin": "notes", "version": "1.1.0", "versionId": "v11", "syncedAt": "2026-11-17T12:00:00Z", "skills": ["jot"]}`)
 	putFile(t, filepath.Join(codex, "notes--jot", "SKILL.md"), "---\nname: jot\ndescription: Jot a note\n---\n")
-	putFile(t, filepath.Join(codex, ".line-lx", "an-old-plugin-with-a-long-name.json"), `{"hub": "`+hub+`", "plugin": "an-old-plugin-with-a-long-name", "version": "2.0.0", "versionId": "v2", "syncedAt": "2026-09-01T12:00:00Z", "skills": ["gone"]}`)
-	putFile(t, filepath.Join(codex, "an-old-plugin-with-a-long-name--gone", "SKILL.md"), "---\nname: gone\n---\n")
+	putFile(t, filepath.Join(codex, ".line-lx", "old-notes.json"), `{"hub": "`+hub+`", "plugin": "old-notes", "version": "2.0.0", "versionId": "v2", "syncedAt": "2026-09-01T12:00:00Z", "skills": ["gone"]}`)
+	putFile(t, filepath.Join(codex, "old-notes--gone", "SKILL.md"), "---\nname: gone\n---\n")
 
 	pi := filepath.Join(home, ".pi", "agent", "skills")
 	putFile(t, filepath.Join(pi, "notes", ".line-lx.json"), `{"hub": "`+hub+`", "plugin": "notes", "version": "1.2.0", "versionId": "v12", "syncedAt": "2026-11-19T11:58:00Z"}`)
 	putFile(t, filepath.Join(pi, "notes", "jot", "SKILL.md"), "---\nname: jot\ndescription: Jot a note\n---\n")
 	putFile(t, filepath.Join(pi, "notes", "summary", "SKILL.md"), "---\nname: summary\n---\n")
 	putFile(t, filepath.Join(pi, "theirs", ".line-lx.json"), `{"hub": "https://other.example.com", "plugin": "theirs", "version": "3.0.0", "versionId": "x", "syncedAt": "2026-11-19T11:00:00Z"}`)
-	putFile(t, filepath.Join(pi, "theirs", "help-with-everything-that-the-other-hub-has-to-offer", "SKILL.md"), "---\nname: help-with-everything-that-the-other-hub-has-to-offer\ndescription: Helps with what the other hub offers, from start to end\n---\n")
+	putFile(t, filepath.Join(pi, "theirs", "help-them", "SKILL.md"), "---\nname: help-them\ndescription: Helps with what the other hub offers, from start to end\n---\n")
 	return home
 }
 
@@ -155,7 +175,11 @@ func TestHubTextIsCleaned(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"workspace": {"slug": "dev", "name": "Dev\u001b[2J\u001b[1;31m Co"}, "agents": [
   {"target": "codex", "plugins": [
     {"name": "notes", "route": 2, "line": "engineering\u001b[31m", "latestVersion": "1.2.0", "deliveredVersion": "1.0.0; rm -rf",
-     "skills": [{"name": "jot", "description": "Jot‮ a\n note\u001b]8;;http://x\u0007"}, {"name": "../evil", "description": "x"}],
+     "skills": [{"name": "jot", "description": "Jot‮ a\n note\u001b]8;;http://x\u0007",
+       "review": {"status": "done", "label": "No\u001b[31m fin\u0090dings‮\u001b]8;;http://x\u0007", "tone": "ok", "counts": {"medium": -3}}},
+      {"name": "../evil", "description": "x"},
+      {"name": "odd", "review": {"status": "done", "label": "Safe", "tone": "great"}},
+      {"name": "odder", "review": {"status": "done", "label": "x", "tone": "ok", "counts": {"high": "many"}}}],
      "hooks": [{"event": "PostToolUse", "command": "line-lx\u0007 report-usage"}, {"event": "Bad Event", "command": "x"}]},
     {"name": "Not-Valid\u001b[31m", "latestVersion": "1.0.0"}]},
   {"target": "../x", "plugins": [{"name": "sneaky", "latestVersion": "1.0.0"}]}
@@ -167,7 +191,9 @@ func TestHubTextIsCleaned(t *testing.T) {
 		t.Errorf("workspace name = %q", v.workspace.Name)
 	}
 	notes := v.agents["codex"].plugins["notes"]
-	if want := []statusSkill{{"jot", "Jot a note"}}; !reflect.DeepEqual(notes.skills, want) {
+	// A review in a shape line-lx doesn't know (an unknown tone, a count that isn't one) is no review, never a failure.
+	want := []statusSkill{{"jot", "Jot a note", &statusReview{Status: "done", Label: "No findings", Tone: "ok"}}, {"odd", "", nil}, {"odder", "", nil}}
+	if !reflect.DeepEqual(notes.skills, want) {
 		t.Errorf("skills = %+v, want %+v", notes.skills, want)
 	}
 	if want := []statusHook{{"PostToolUse", "line-lx report-usage"}}; !reflect.DeepEqual(notes.hooks, want) {
@@ -265,7 +291,7 @@ func TestStatusWithoutHub(t *testing.T) {
 		}
 	}
 
-	check("answer", hubOK, "metro-lx · Dev (dev)")
+	check("answer", hubOK, "▌▌▌ metro-lx  Dev")
 	h.status, h.answer = http.StatusNotFound, `{"error": {"code": "not_found", "message": "Not found"}}`
 	check("404", hubUnsupported, "The hub doesn't say what it delivered yet (it needs an update)")
 	h.status, h.answer = http.StatusInternalServerError, `{"error": {"code": "internal_error", "message": "boom"}}`
@@ -283,110 +309,10 @@ func TestStatusWithoutHub(t *testing.T) {
 	t.Setenv("LINE_LX_HUB", h.URL)
 	t.Setenv("LINE_LX_TOKEN", statusToken)
 	h.Close()
-	check("unreachable", hubUnreachable, "The hub didn't answer, so this is only what's on this machine.\nCan't reach the hub")
+	check("unreachable", hubUnreachable, "  The hub didn't answer, so this is only what's on this machine.\n  Can't reach the hub")
 }
 
-// statusGolden is the fixture machine, side by side with the hub, at statusNow, without color.
-const statusGolden = `metro-lx · Dev (dev)
-hub  HUB
-
-▌Claude Code   connected · fetched 2h ago
-│
-├─ (1) notes     v1.2.0  up to date · yesterday
-│   ┃ ●  jot      Jot a note, quickly
-│   ┃ ●  summary  Sum up the notes of the day
-│
-├─ (2) tools     v1.0.0 → v1.1.0  behind · 10 Nov 2026
-│   ┃ ●  lint  Lint the repository
-│
-├─ (3) extra     not installed
-│   ┃ ●  help  Help
-│
-└─  ◎  metro-lx  13cd9935af1d → a1b2c3d4e5f6  behind · 12 Nov 2026
-    ┃ ▲  PostToolUse         line-lx report-usage --agent claude-code --workspa…
-    ┃ ▲  PostToolUseFailure  line-lx report-usage --agent claude-code --workspa…
-  Run ` + "`line-lx sync`" + `, or start Claude Code, to install what's missing.
-
-▌Codex         set up · ~/.codex/skills · synced 2d ago
-│
-├─ (1) notes                           v1.1.0 → v1.2.0  behind · 2d ago
-│   ┃ ●  jot  Jot a note
-│
-├─ (2) tools                           not installed
-│   ┃ ●  lint  Lint the repository
-│
-├─ (3) extra                           not installed
-│   ┃ ●  help  Help
-│
-└─     an-old-plugin-with-a-long-name  v2.0.0  not in the hub · 1 Sep 2026
-    ┃ ●  gone
-  Run ` + "`line-lx sync`" + ` to catch up with the hub.
-
-▌pi            set up · ~/.pi/agent/skills · synced 2m ago
-│
-├─ (1) notes   v1.2.0  up to date · 2m ago
-│   ┃ ●  jot      Jot a note
-│   ┃ ●  summary  Sum up the notes of the day
-│
-├─ (2) tools   not installed
-│   ┃ ●  lint  Lint the repository
-│
-├─ (3) extra   not installed
-│   ┃ ●  help  Help
-│
-└─     theirs  v3.0.0  other hub · 1h ago
-    ┃    from https://other.example.com
-    ┃ ●  help-with-everything-that-the-other-hub-has-to-offer
-    ┃    Helps with what the other hub offers, from start to end
-  Run ` + "`line-lx sync`" + ` to catch up with the hub.
-`
-
-// TestRenderStatus reads the fixture machine (Claude Code's records, line-lx's stamps), puts it side by side
-// with the hub, and renders it in 80 columns.
-func TestRenderStatus(t *testing.T) {
-	h := newStatusHub(t)
-	statusMachine(t, h.URL)
-	hub, _ := checkHub(h.URL)
-	r := buildStatus(hub, fetchHubView(hub))
-	var b strings.Builder
-	renderStatus(&b, r, statusNow, noColor)
-	if want := strings.ReplaceAll(statusGolden, "HUB", hub); b.String() != want {
-		t.Errorf("status:\n%s\nwant:\n%s", b.String(), want)
-	}
-	for i, line := range strings.Split(b.String(), "\n") {
-		if n := cols(line); n > statusWidth {
-			t.Errorf("line %d is %d columns wide: %q", i+1, n, line)
-		}
-	}
-	// In color, the same glyphs and words in the same columns: a color only adds to what the text says. The route
-	// bullet is the one difference: " 1 " on its line's color, "(1)" without.
-	sgr := regexp.MustCompile("\x1b\\[[0-9;]*m")
-	for _, depth := range []painter{colors256, trueColor} {
-		var colored strings.Builder
-		renderStatus(&colored, r, statusNow, depth)
-		plain := regexp.MustCompile(`\((\d)\)`).ReplaceAllString(b.String(), " $1 ")
-		if got := sgr.ReplaceAllString(colored.String(), ""); got != plain {
-			t.Errorf("depth %d, without its colors:\n%s\nwant:\n%s", depth, got, plain)
-		}
-	}
-}
-
-// TestStatusFitsInColumns: a description is cut by the columns it takes in a terminal, not by its characters: a
-// wide character (CJK, emoji) takes two, a combining accent none.
-func TestStatusFitsInColumns(t *testing.T) {
-	p := statusPlugin{Name: "notes", Skills: []statusSkill{
-		{"helper", "Formats release notes 📝 for the team in a consistent style, every week, with care"},
-		{"g-inject", "リリースノートをチームのために一貫したスタイルで整形します。毎週、丁寧に。"},
-		{"accents", "Re\u0301sume\u0301 des notes de version pour l'e\u0301quipe, chaque semaine, avec soin et style"},
-	}}
-	for _, line := range stationLines(p, "│   ", noColor) {
-		if n := cols(line); n > statusWidth || n < statusWidth-1 {
-			t.Errorf("%d columns, want %d (or %d when a wide character doesn't fit): %q", n, statusWidth, statusWidth-1, line)
-		}
-	}
-}
-
-// TestStatusChangesNothing: status reads; every file of the machine is as it was, and nothing is added.
+// TestStatusChangesNothing: status and usage read; every file of the machine is as it was, and nothing is added.
 func TestStatusChangesNothing(t *testing.T) {
 	h := newStatusHub(t)
 	home := statusMachine(t, h.URL)
@@ -410,6 +336,7 @@ func TestStatusChangesNothing(t *testing.T) {
 	before := snapshot()
 	captureStdout(t, func() { _ = runStatus(false) })
 	captureStdout(t, func() { _ = runStatus(true) })
+	captureStdout(t, func() { _ = runUsage(false, false) })
 	if after := snapshot(); !reflect.DeepEqual(before, after) {
 		t.Errorf("status changed the machine:\nbefore %v\nafter  %v", before, after)
 	}

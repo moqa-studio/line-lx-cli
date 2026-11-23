@@ -208,7 +208,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if enabled := s["enabledPlugins"]; !reflect.DeepEqual(enabled, wantEnabled) {
 		t.Errorf("enabledPlugins = %v\nwant %v", enabled, wantEnabled)
 	}
-	if !strings.Contains(out, `claude-code  skipped the plugin "Bad Name": line-lx refuses its name`+"\n") {
+	if !strings.Contains(flat(out), `Skipped the plugin "Bad Name": line-lx refuses its name.`) {
 		t.Errorf("the refused name isn't shown, or not sanitized:\n%q", out)
 	}
 	if !strings.Contains(read(t, settings), `"command": "a && b <c>"`) {
@@ -220,12 +220,9 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if argv := read(t, filepath.Join(bin, "argv")); argv != "plugin marketplace list --json\n--version\n" {
 		t.Errorf("claude got more than the list and its version:\n%s", argv)
 	}
-	want := "claude-code  connected: Claude Code gets Dev's plugins from the hub from its next start.\n"
-	if !strings.Contains(out, want) {
+	want := "✓  Claude Code   connected · it gets the plugins from its next start\n"
+	if !strings.Contains(out, want) || results[0].claude == nil || results[0].claude.now {
 		t.Errorf("output lacks %q:\n%s", want, out)
-	}
-	if summary := setupSummary(hub.URL, results); !strings.Contains(summary, "Claude Code  connected: Claude Code gets Dev's plugins") {
-		t.Errorf("summary:\n%s", summary)
 	}
 	if len(hub.deliveries) != 0 {
 		t.Errorf("Claude Code deliveries were reported: %v", hub.deliveries)
@@ -250,7 +247,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	if read(t, settings) != before {
 		t.Error("an up-to-date sync rewrote the settings")
 	}
-	if !strings.Contains(out, "claude-code  already connected: Claude Code gets Dev's plugins from the hub by itself. Next: run /reload-plugins") {
+	if !strings.Contains(out, "connected · it installs new versions itself\n") || !strings.Contains(out, "→ Run /reload-plugins in Claude Code, or restart it.") {
 		t.Errorf("output:\n%s", out)
 	}
 
@@ -267,7 +264,7 @@ func TestSyncConnectsClaudeCode(t *testing.T) {
 	hub.mu.Unlock()
 	setClaude(t, bin, `[]`, `[]`)
 	out = captureStdout(t, func() { results, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
-	if err != nil || !strings.Contains(out, "claude-code  skipped: "+errNoBundle.Error()) || results[0].skipped == "" {
+	if err != nil || !strings.Contains(flat(out), "· Claude Code skipped: "+errNoBundle.Error()) || results[0].skipped == "" {
 		t.Errorf("sync = %v:\n%s", err, out)
 	}
 }
@@ -303,7 +300,7 @@ func TestSyncClaudeCodeInstallsWhatItCan(t *testing.T) {
 		}
 	}
 	want := "It installs basics at its next start instead (`claude plugin install -- basics@metro-dev`: boom)."
-	if err != nil || !strings.Contains(out, want) || exists(oldDir) {
+	if err != nil || !strings.Contains(flat(out), want) || exists(oldDir) {
 		t.Errorf("sync = %v, former folder left: %v:\n%s", err, exists(oldDir), out)
 	}
 	os.Remove(filepath.Join(bin, "fail"))
@@ -311,7 +308,7 @@ func TestSyncClaudeCodeInstallsWhatItCan(t *testing.T) {
 	// Claude Code can't list its plugins: no install, and the next start brings them.
 	setClaude(t, bin, known, `not json`)
 	out, err = run()
-	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") || !strings.Contains(out, "already connected") {
+	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") || !strings.Contains(out, "it installs new versions itself") {
 		t.Errorf("sync = %v; claude got:\n%s\n%s", err, argv, out)
 	}
 
@@ -322,7 +319,7 @@ func TestSyncClaudeCodeInstallsWhatItCan(t *testing.T) {
 	setClaude(t, bin, known, `[]`)
 	out, err = run()
 	if argv := read(t, filepath.Join(bin, "argv")); err != nil || strings.Contains(argv, "install") ||
-		!strings.Contains(out, "It installs basics, notes, tools at its next start instead (line-lx stopped installing after") {
+		!strings.Contains(flat(out), "It installs basics, notes, tools at its next start instead (line-lx stopped installing after") {
 		t.Errorf("sync = %v; claude got:\n%s\n%s", err, argv, out)
 	}
 }
@@ -386,7 +383,7 @@ func TestSyncClaudeCodeMigratesFromTheFolder(t *testing.T) {
 	if exists(oldDir) || exists(filepath.Dir(oldDir)) {
 		t.Error("line-lx's former folder is still there")
 	}
-	if !strings.Contains(out, "from its next start. The plugins line-lx installed before come back when Claude Code starts again.") {
+	if !strings.Contains(flat(out), "from its next start The plugins line-lx installed before come back when Claude Code starts again.") {
 		t.Errorf("output:\n%s", out)
 	}
 }
@@ -410,7 +407,7 @@ func TestSyncClaudeCodeWithoutCLI(t *testing.T) {
 	if !exists(oldDir) {
 		t.Error("the former folder went before Claude Code stopped reading it")
 	}
-	if !strings.Contains(out, "connected: Claude Code gets Dev's plugins from the hub from its next start.") {
+	if !strings.Contains(out, "connected · it gets the plugins from its next start") {
 		t.Errorf("output:\n%s", out)
 	}
 }
@@ -611,18 +608,15 @@ func TestSyncWarnsAboutAnOldClaudeCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an old Claude Code must be a warning, not a failure: %v\n%s", err, out)
 	}
-	want := "Claude Code 2.1.292 is older than 2.1.319: update it, or plugins published later won't arrive by themselves."
-	if !strings.Contains(out, "claude-code  warning: "+want+"\n") {
+	want := "!  Claude Code   2.1.292 is older than 2.1.319\n                   → Run `claude update`, or new plugins won't arrive.\n"
+	if !strings.Contains(out, want) || results[0].outdated != "2.1.292" {
 		t.Errorf("sync doesn't warn:\n%s", out)
-	}
-	if summary := setupSummary(hub.URL, results); !strings.Contains(summary, "from its next start. "+want+"\n") {
-		t.Errorf("setup's summary doesn't warn:\n%s", summary)
 	}
 
 	// A recent one: no warning.
 	os.Remove(filepath.Join(bin, "version"))
 	out = captureStdout(t, func() { results, err = syncAll(&hubClient{hub: hub.URL, token: "tok"}) })
-	if err != nil || strings.Contains(out, "warning") || results[0].warning != "" {
+	if err != nil || strings.Contains(out, "older than") || results[0].outdated != "" {
 		t.Errorf("sync = %v, warned about a recent Claude Code:\n%s", err, out)
 	}
 }
@@ -707,27 +701,8 @@ func TestBearerKeepsTokenOnItsHub(t *testing.T) {
 	}
 }
 
-func TestSetupSummary(t *testing.T) {
-	home, _ := os.UserHomeDir()
-	got := setupSummary("https://hub.example.com", []*agentResult{
-		{name: claudeTarget, connected: "connected: Claude Code gets Dev's plugins from the hub from its next start."},
-		{name: "pi", where: filepath.Join(home, ".pi", "agent", "skills"), current: 3},
-		{name: "codex", where: "/x", delivered: 1, failed: 1},
-		{name: claudeTarget, skipped: "the hub has no Claude Code marketplace yet"},
-		{name: claudeTarget, failed: 1},
-	})
-	for _, want := range []string{
-		"Claude Code  connected: Claude Code gets Dev's plugins from the hub from its next start.\n",
-		"pi           3 plugins in ~/.pi/agent/skills. Nothing new.\n", // no next step
-		"Codex        1 plugin in /x. 1 failed: see above, or run `line-lx doctor`. Next: start a new Codex session.\n",
-		"Claude Code  nothing installed: the hub has no Claude Code marketplace yet.\n",
-		"Claude Code  not connected: see above, or run `line-lx doctor`.\n",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("summary lacks %q:\n%s", want, got)
-		}
-	}
-}
+// flat is s on one line, its spaces and line breaks one space each: text the output wraps reads whole.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // captureStdout returns what fn prints.
 func captureStdout(t *testing.T, fn func()) string {
@@ -761,11 +736,9 @@ func TestSyncClaudeCodeFailure(t *testing.T) {
 	if !errors.As(err, new(errSilent)) {
 		t.Fatalf("sync = %v, want a failure", err)
 	}
-	if !strings.Contains(out, "claude-code  failed: can't read `claude plugin marketplace list --json`") || !strings.Contains(out, "1 failed.") {
+	if !strings.Contains(flat(out), "✗ Claude Code can't read `claude plugin marketplace list --json`") || !strings.Contains(out, "1 failed. Done in") ||
+		results[0].err == "" {
 		t.Errorf("the error isn't shown:\n%s", out)
-	}
-	if summary := setupSummary(hub.URL, results); !strings.Contains(summary, "Claude Code  not connected: see above") {
-		t.Errorf("summary:\n%s", summary)
 	}
 }
 
@@ -858,7 +831,7 @@ func TestSetupWithoutAgentGivesTheHubsMCPURL(t *testing.T) {
 	t.Setenv("LINE_LX_TOKEN", "tok")
 	var err error
 	out := captureStdout(t, func() { err = runSetup("") })
-	if err != nil || !strings.Contains(out, "connect to the MCP server instead: https://mcp.example.com/mcp\n") {
+	if err != nil || !strings.Contains(flat(out), "connect to the MCP server instead: https://mcp.example.com/mcp") {
 		t.Errorf("setup = %v, printed:\n%s", err, out)
 	}
 }

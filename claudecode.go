@@ -194,24 +194,26 @@ func claudeVersionOK(out string) (version string, ok bool) {
 	return clean(version), len(have) == 3 && slices.Compare(have, want) >= 0
 }
 
-// claudeOutdated is the warning for a `claude` on the PATH older than minClaudeVersion, or "" when it is
-// recent enough, absent, or doesn't tell its version (doctor reports that).
+// claudeOutdated is the version of a `claude` on the PATH older than minClaudeVersion, or "" when it is recent
+// enough, absent, or doesn't tell its version (doctor reports that).
 func claudeOutdated() string {
 	if !claudeOnPath() {
 		return ""
 	}
 	out, err := claude("--version")
 	version, ok := claudeVersionOK(string(out))
-	if err != nil || ok || version == "" {
+	if err != nil || ok {
 		return ""
 	}
-	return outdatedText(version)
+	return version
 }
 
-// outdatedText tells the person to update a Claude Code older than minClaudeVersion.
+// outdatedText says Claude Code is older than minClaudeVersion; claudeUpdate is what to do about it.
 func outdatedText(version string) string {
-	return fmt.Sprintf("Claude Code %s is older than %s: update it, or plugins published later won't arrive by themselves", version, minClaudeVersion)
+	return fmt.Sprintf("%s is older than %s", version, minClaudeVersion)
 }
+
+const claudeUpdate = "Run `claude update`, or new plugins won't arrive."
 
 // errNoMarketplace and errNoBundle: the hub doesn't serve what Claude Code needs (yet). Not a failure:
 // sync skips the target.
@@ -236,10 +238,10 @@ func claudeSkipped(err error) bool {
 	return errors.Is(err, errNoMarketplace) || errors.Is(err, errNoBundle) || errors.As(err, &clash)
 }
 
-// hubCatalog is what line-lx needs from the hub's marketplace: its name, its owner (the workspace), and
-// its plugins but the bundle, without the names line-lx refuses (in refused).
+// hubCatalog is what line-lx needs from the hub's marketplace: its name, and its plugins but the bundle,
+// without the names line-lx refuses (in refused).
 type hubCatalog struct {
-	name, owner      string
+	name             string
 	plugins, refused []string
 }
 
@@ -248,7 +250,6 @@ type hubCatalog struct {
 func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 	var doc struct {
 		Name    string
-		Owner   struct{ Name string }
 		Plugins []struct{ Name string }
 	}
 	if err := api.do("GET", "/api/connectors/claude-code/marketplace.json", nil, &doc); err != nil {
@@ -261,10 +262,7 @@ func hubMarketplace(api *hubClient) (*hubCatalog, error) {
 	if !validName(doc.Name) {
 		return nil, errors.New("the hub's marketplace has no valid name")
 	}
-	cat := &hubCatalog{name: doc.Name, owner: clean(doc.Owner.Name)}
-	if cat.owner == "" {
-		cat.owner = "your workspace"
-	}
+	cat := &hubCatalog{name: doc.Name}
 	bundle := false
 	for _, p := range doc.Plugins {
 		switch {
@@ -600,23 +598,32 @@ func claudeBlocked(api *hubClient) error {
 	return connectSettings(s, path, cat, api.hub, oldDir, "")
 }
 
-// claudeConnect connects Claude Code to the hub, and says what it did in one sentence. Running it again
-// changes nothing, but installs the plugins Claude Code still lacks.
-func claudeConnect(api *hubClient) (string, error) {
+// claudeConnected is what connecting Claude Code did, for sync's row.
+type claudeConnected struct {
+	now        bool     // Claude Code knows the marketplace: it installs new versions by itself from now on
+	reload     bool     // its settings changed, or line-lx installed a plugin: /reload-plugins brings them in
+	comeBack   bool     // line-lx moved it off a marketplace it had: what it installed from there comes back at its next start
+	pending    []string // plugins it installs at its next start instead, because of pendingErr
+	pendingErr error
+	refused    []string // plugins of the marketplace whose names line-lx refuses
+}
+
+// claudeConnect connects Claude Code to the hub, and says what it did. Running it again changes nothing, but
+// installs the plugins Claude Code still lacks.
+func claudeConnect(api *hubClient) (claudeConnected, error) {
+	var done claudeConnected
 	cat, err := hubMarketplace(api)
 	if err != nil {
-		return "", err
+		return done, err
 	}
-	for _, name := range cat.refused {
-		fmt.Printf("%-12s skipped the plugin %q: line-lx refuses its name\n", claudeTarget, name)
-	}
+	done.refused = cat.refused
 	oldDir, err := claudeDir(api.hub)
 	if err != nil {
-		return "", err
+		return done, err
 	}
 	helper, err := helperCommand()
 	if err != nil {
-		return "", err
+		return done, err
 	}
 	// Refuse before changing anything: settings line-lx can't change, or another marketplace under the name.
 	s, path, _, err := readClaudeSettings()
@@ -624,7 +631,7 @@ func claudeConnect(api *hubClient) (string, error) {
 		err = connectSettings(s, path, cat, api.hub, oldDir, helper)
 	}
 	if err != nil {
-		return "", err
+		return done, err
 	}
 
 	known, onPath := false, claudeOnPath()
@@ -632,7 +639,7 @@ func claudeConnect(api *hubClient) (string, error) {
 	if onPath {
 		list, err := claudeMarketplaces()
 		if err != nil {
-			return "", err
+			return done, err
 		}
 		for _, m := range list {
 			switch {
@@ -641,16 +648,16 @@ func claudeConnect(api *hubClient) (string, error) {
 			case m.ours(api.hub, oldDir): // line-lx's former folder, or the workspace's former name
 				stale = append(stale, m.Name)
 			case m.Name == cat.name:
-				return "", errMarketplaceClash{cat.name, m.Path + m.URL}
+				return done, errMarketplaceClash{cat.name, m.Path + m.URL}
 			}
 		}
 		// Removing a marketplace uninstalls its plugins: Claude Code installs them again from the hub.
 		for _, name := range stale {
 			if !validName(name) {
-				return "", fmt.Errorf("Claude Code has the hub's marketplace under an invalid name %q", clean(name))
+				return done, fmt.Errorf("Claude Code has the hub's marketplace under an invalid name %q", clean(name))
 			}
 			if _, err := claude("plugin", "marketplace", "remove", "--", name); err != nil {
-				return "", err
+				return done, err
 			}
 		}
 	}
@@ -658,7 +665,7 @@ func claudeConnect(api *hubClient) (string, error) {
 	// Read again: removing a marketplace changes the settings.
 	s, path, mode, err := readClaudeSettings()
 	if err != nil {
-		return "", err
+		return done, err
 	}
 	before, _ := json.Marshal(s)
 	var old settingsMarket
@@ -666,13 +673,13 @@ func claudeConnect(api *hubClient) (string, error) {
 		_ = json.Unmarshal(markets[cat.name], &old)
 	}
 	if err := connectSettings(s, path, cat, api.hub, oldDir, helper); err != nil {
-		return "", err
+		return done, err
 	}
 	after, _ := json.Marshal(s)
 	changed := !bytes.Equal(before, after)
 	if changed {
 		if err := writeClaudeSettings(s, path, mode); err != nil {
-			return "", err
+			return done, err
 		}
 	}
 	// Claude Code fetches the marketplace again from a source its settings changed, when it starts; until
@@ -713,31 +720,19 @@ func claudeConnect(api *hubClient) (string, error) {
 	// line-lx's former folder, once Claude Code no longer reads plugins from it.
 	if onPath {
 		if err := os.RemoveAll(oldDir); err != nil {
-			return "", err
+			return done, err
 		}
 		_ = os.Remove(filepath.Dir(oldDir)) // only when no other hub's folder is left
 	}
 
-	gets := fmt.Sprintf("Claude Code gets %s's plugins from the hub", cat.owner)
 	if !now {
 		// Claude Code doesn't know the marketplace (yet): it fetches it when it starts.
-		msg := "connected: " + gets + " from its next start."
-		if len(stale) > 0 || old.Source.Source == "directory" {
-			msg += " The plugins line-lx installed before come back when Claude Code starts again."
-		}
-		return msg, nil
+		done.comeBack = len(stale) > 0 || old.Source.Source == "directory"
+		return done, nil
 	}
-	msg := "connected: " + gets + " by itself."
-	if !changed {
-		msg = "already " + msg
-	}
-	if changed || installedSome {
-		msg += " Next: run /reload-plugins in Claude Code, or restart it."
-	}
-	if len(pending) > 0 {
-		msg += fmt.Sprintf(" It installs %s at its next start instead (%v).", strings.Join(pending, ", "), installErr)
-	}
-	return msg, nil
+	done.now, done.reload = true, changed || installedSome
+	done.pending, done.pendingErr = pending, installErr
+	return done, nil
 }
 
 func isDir(path string) bool {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -271,7 +272,14 @@ func runWhoami() error {
 	if err := c.do("GET", "/api/me", nil, &m); err != nil {
 		return err
 	}
-	fmt.Printf("%s %s\nworkspace  %s (%s)\nrole       %s\nhub        %s\n",
-		clean(m.User.Name), clean(m.User.Email), clean(m.Org.Name), clean(m.Org.Slug), clean(m.Role), c.hub)
+	p := colorDepth(os.Stdout)
+	writeHeader(os.Stdout, p, []seg{plain(clean(m.User.Name))}, []seg{{clean(m.User.Email), p.dim}})
+	for _, kv := range [][2]string{
+		{"workspace", clean(m.Org.Name) + " (" + clean(m.Org.Slug) + ")"},
+		{"role", clean(m.Role)},
+		{"hub", c.hub},
+	} {
+		fmt.Println(new(row).at(6, seg{kv[0], p.dim}).at(17, plain(kv[1])).String())
+	}
 	return nil
 }
