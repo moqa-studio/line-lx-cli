@@ -75,38 +75,41 @@ Agents are used only when found on the machine: Claude Code (`~/.claude` exists,
 
 ## Status
 
-`line-lx status` shows what's connected on this machine, one tree per agent:
+`line-lx status` shows what's connected on this machine, drawn like the metro-lx map. Each agent is a terminus. Each plugin is a line, with the route number and the color the web app gives it. Its skills (●) and hooks (▲) are the stations on it.
 
 ```
-Hub        https://hub.example.com
-Workspace  Acme (acme)
+metro-lx · Acme (acme)
+hub  hub.example.com
 
-Claude Code  connected · metro-acme · marketplace fetched 2 h ago
-  PLUGIN           VERSION       STATUS                INSTALLED  UPDATED
-  moqa-kit         1.0.0         behind: 1.1.0         9 d ago    9 d ago
-  └─ skill review  Review a pull request
-  posthog-dev-kit  1.3.0         up to date            18 d ago   8 h ago
-  ├─ skill board-apple-ads  Build and maintain an Apple Ads dashboard that answ…
-  └─ skill capture          Capture an event
-  metro-lx         13cd9935af1d  behind: 2f0c81d4a9e7  6 d ago    6 d ago
-  └─ hook  PostToolUse  line-lx report-usage --agent claude-code --workspace ac…
+▌Claude Code   connected · fetched 2h ago
+│
+├─ (1) moqa-kit         v1.0.0 → v1.1.0  behind · 9h ago
+│   ┃ ●  review  Review a pull request
+│
+├─ (4) posthog-dev-kit  v1.3.0  up to date · 8h ago
+│   ┃ ●  board-apple-ads  Build and maintain an Apple Ads dashboard that answer…
+│   ┃ ●  capture          Capture an event
+│
+└─  ◎  metro-lx         13cd9935af1d  up to date · yesterday
+    ┃ ▲  PostToolUse  line-lx report-usage --agent claude-code --workspace acme
   Claude Code catches up with the hub by itself, in its next session.
 
-Codex        set up · ~/.codex/skills · synced 2 d ago
-  PLUGIN           VERSION  STATUS         INSTALLED  UPDATED
-  posthog-dev-kit  1.2.0    behind: 1.3.0  18 d ago   2 d ago
-  └─ skill capture  Capture an event in PostHog
+▌Codex         set up · ~/.codex/skills · synced 2d ago
+│
+└─ (4) posthog-dev-kit  v1.2.0 → v1.3.0  behind · 2d ago
+    ┃ ●  capture  Capture an event in PostHog
   Run `line-lx sync` to catch up with the hub.
 
-pi           not found
+▌pi            not found
 ```
 
 - **This machine.** For Claude Code, line-lx reads how its settings connect it to the hub (as `doctor` does), then Claude Code's own records: `plugins/known_marketplaces.json` (when it last fetched the marketplace), `plugins/installed_plugins.json` (each plugin's version and scope, when it was installed and last updated) and each plugin's folder in `plugins/cache/<marketplace>/<plugin>/` (its skills, and the hooks in `hooks/hooks.json`). It reads plugin files only inside that cache. A marketplace declared outside the settings files line-lx reads (an MDM profile) counts when Claude Code's records have it from the hub's URL. For Codex and pi, line-lx reads its own stamps and the skill folders it wrote. A stamp has the time of the last write, not of the first.
-- **The hub.** With your sign-in, line-lx asks the hub what it delivered to you (`GET /api/me/installed`): each plugin's latest version, the version it delivered and when, and when Claude Code last fetched the marketplace. The hub's times are yours, on any of your machines. INSTALLED and UPDATED show this machine's times, else the hub's.
-- **States.** `behind`: the version here isn't the hub's latest. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone.
+- **The hub.** With your sign-in, line-lx asks the hub what it delivered to you (`GET /api/me/installed`): each plugin's line and route, its latest version, the version it delivered and when, and when Claude Code last fetched the marketplace. The hub's times are yours, on any of your machines. A plugin's last update shows this machine's time, else the hub's.
+- **Lines.** A plugin's route bullet and line take the color the web app gives it, from the hub: 1 engineering blue, 2 product purple, 3 marketing orange, 4 sales yellow, 5 support green, 6 everyone ink. `metro-lx`, Claude Code's bundle, isn't a team's line: it has the interchange ring ◎, in ink. A plugin with no line from the hub (a hub without them, another hub, a plugin the hub no longer has) is in ink, with no number.
+- **States.** `up to date` (green). `behind`: the version here isn't the hub's latest, shown after the arrow. `not installed`: the hub has the plugin for that agent, this machine doesn't. `not in the hub`: it's here from this hub, which no longer has it. `other hub`: a stamp says it came from another hub, and line-lx leaves it alone. These three are grey. Red is kept for failed and blocked.
 - **Without the hub.** Not signed in, a sign-in the hub refuses, a hub that doesn't answer, or one too old to have `GET /api/me/installed` (404): line-lx shows what this machine has, and says why.
 - It writes nothing, installs nothing and runs no agent. Like every command, it refreshes an expired sign-in. It never prints the token. It exits 0, unless the configured hub URL isn't valid.
-- The output fits in 80 columns where it can. Plugin and skill names and versions are never cut, so a long one widens its column; a description or a hook's command is cut to fit, and goes on the next line when a long name leaves it too little room. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`.
+- The output fits in 80 columns where it can. Plugin and skill names and versions are never cut, so a long one widens its column; a description or a hook's command is cut to fit, and goes on the next line when a long name leaves it too little room. It has color only on a terminal, when `NO_COLOR` isn't set and `TERM` isn't `dumb`: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256 colors. Without color, the route numbers show in brackets, `(1)`, and the shapes and words say the same.
 
 ### `status --json`
 
@@ -129,6 +132,8 @@ pi           not found
 | `agents[].plugins[]` | What's installed here by name, then what's missing by name, then the bundle |
 | `.name` | The plugin's name |
 | `.bundle` | `true` for Claude Code's `metro-lx`, which brings the workspace's other plugins |
+| `.route` | From the hub: the route number of the plugin's line, 1 to 6, as the web app shows it. `null` for the bundle, a plugin from another hub or no longer in the hub, and with a hub that doesn't give lines. |
+| `.line` | From the hub: the plugin's line, `engineering`, `product`, `marketing`, `sales`, `support` or `everyone`. `null` when `route` is. |
 | `.state` | `up-to-date`, `behind`, `installed` (the hub's latest is unknown), `missing`, `not-in-hub` or `other-hub` |
 | `.version` | The version installed here, `null` when missing |
 | `.latestVersion` | The hub's latest version |

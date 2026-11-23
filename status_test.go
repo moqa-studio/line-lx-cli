@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -56,21 +57,21 @@ func newStatusHub(t *testing.T) *statusHub {
 	return h
 }
 
-// statusAnswer is the hub's view of the fixture machine's person: notes 1.2.0, tools 1.1.0 and extra 0.1.0
-// for every agent, and the bundle for Claude Code, with the usage hook.
+// statusAnswer is the hub's view of the fixture machine's person: notes 1.2.0 (route 1), tools 1.1.0 (route 4)
+// and extra 0.1.0 (route 2) for every agent, and the bundle for Claude Code, with the usage hook.
 func statusAnswer(hub string) string {
 	plugins := func(delivered string) string {
 		return `[
-      {"name": "notes", "latestVersion": "1.2.0", "deliveredVersion": "` + delivered + `", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-18T09:00:00Z", "behind": false,
+      {"name": "notes", "route": 1, "line": "engineering", "latestVersion": "1.2.0", "deliveredVersion": "` + delivered + `", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-18T09:00:00Z", "behind": false,
        "skills": [{"name": "jot", "description": "Jot a note"}, {"name": "summary", "description": "Sum up the notes of the day"}], "hooks": []},
-      {"name": "tools", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
+      {"name": "tools", "route": 4, "line": "sales", "latestVersion": "1.1.0", "deliveredVersion": "1.0.0", "firstDeliveredAt": "2026-11-10T10:00:00Z", "lastDeliveredAt": "2026-11-10T10:00:00Z", "behind": true,
        "skills": [{"name": "lint", "description": "Lint the repository"}], "hooks": []},
-      {"name": "extra", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
+      {"name": "extra", "route": 2, "line": "product", "latestVersion": "0.1.0", "deliveredVersion": null, "firstDeliveredAt": null, "lastDeliveredAt": null, "behind": false,
        "skills": [{"name": "help", "description": "Help"}], "hooks": []}`
 	}
 	return `{"workspace": {"slug": "dev", "name": "Dev"}, "hub": "` + hub + `", "agents": [
     {"target": "claude-code", "lastFetchedAt": "2026-11-19T08:00:00Z", "plugins": ` + plugins("1.2.0") + `,
-      {"name": "metro-lx", "latestVersion": "a1b2c3d4e5f6", "deliveredVersion": "13cd9935af1d", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-12T10:00:00Z", "behind": true,
+      {"name": "metro-lx", "route": null, "line": null, "latestVersion": "a1b2c3d4e5f6", "deliveredVersion": "13cd9935af1d", "firstDeliveredAt": "2026-11-01T10:00:00Z", "lastDeliveredAt": "2026-11-12T10:00:00Z", "behind": true,
        "skills": [], "hooks": [{"event": "PostToolUse", "command": "line-lx report-usage --agent claude-code --workspace dev"}]}]},
     {"target": "codex", "lastFetchedAt": null, "plugins": ` + plugins("1.1.0") + `]},
     {"target": "pi", "lastFetchedAt": null, "plugins": ` + plugins("1.2.0") + `]},
@@ -153,7 +154,7 @@ func TestHubTextIsCleaned(t *testing.T) {
 	var doc hubInstalled
 	if err := json.Unmarshal([]byte(`{"workspace": {"slug": "dev", "name": "Dev\u001b[2J\u001b[1;31m Co"}, "agents": [
   {"target": "codex", "plugins": [
-    {"name": "notes", "latestVersion": "1.2.0", "deliveredVersion": "1.0.0; rm -rf",
+    {"name": "notes", "route": 2, "line": "engineering\u001b[31m", "latestVersion": "1.2.0", "deliveredVersion": "1.0.0; rm -rf",
      "skills": [{"name": "jot", "description": "Jot‮ a\n note\u001b]8;;http://x\u0007"}, {"name": "../evil", "description": "x"}],
      "hooks": [{"event": "PostToolUse", "command": "line-lx\u0007 report-usage"}, {"event": "Bad Event", "command": "x"}]},
     {"name": "Not-Valid\u001b[31m", "latestVersion": "1.0.0"}]},
@@ -177,6 +178,9 @@ func TestHubTextIsCleaned(t *testing.T) {
 	}
 	if len(v.agents) != 1 || len(v.latest) != 1 {
 		t.Errorf("an invalid agent or plugin was kept: %v", v.latest)
+	}
+	if len(v.lines) != 0 {
+		t.Errorf("a line line-lx doesn't know was kept: %v", v.lines)
 	}
 }
 
@@ -261,7 +265,7 @@ func TestStatusWithoutHub(t *testing.T) {
 		}
 	}
 
-	check("answer", hubOK, "Workspace  Dev (dev)")
+	check("answer", hubOK, "metro-lx · Dev (dev)")
 	h.status, h.answer = http.StatusNotFound, `{"error": {"code": "not_found", "message": "Not found"}}`
 	check("404", hubUnsupported, "The hub doesn't say what it delivered yet (it needs an update)")
 	h.status, h.answer = http.StatusInternalServerError, `{"error": {"code": "internal_error", "message": "boom"}}`
@@ -283,48 +287,57 @@ func TestStatusWithoutHub(t *testing.T) {
 }
 
 // statusGolden is the fixture machine, side by side with the hub, at statusNow, without color.
-const statusGolden = `Hub        HUB
-Workspace  Dev (dev)
+const statusGolden = `metro-lx · Dev (dev)
+hub  HUB
 
-Claude Code  connected · metro-dev · marketplace fetched 2 h ago
-  PLUGIN    VERSION       STATUS                INSTALLED  UPDATED
-  notes     1.2.0         up to date            18 d ago   27 h ago
-  ├─ skill jot      Jot a note, quickly
-  └─ skill summary  Sum up the notes of the day
-  tools     1.0.0         behind: 1.1.0         9 d ago    9 d ago
-  └─ skill lint  Lint the repository
-  extra     –             not installed         –          –
-  └─ skill help  Help
-  metro-lx  13cd9935af1d  behind: a1b2c3d4e5f6  18 d ago   7 d ago
-  ├─ hook  PostToolUse         line-lx report-usage --agent claude-code --works…
-  └─ hook  PostToolUseFailure  line-lx report-usage --agent claude-code --works…
+▌Claude Code   connected · fetched 2h ago
+│
+├─ (1) notes     v1.2.0  up to date · yesterday
+│   ┃ ●  jot      Jot a note, quickly
+│   ┃ ●  summary  Sum up the notes of the day
+│
+├─ (4) tools     v1.0.0 → v1.1.0  behind · 10 Nov 2026
+│   ┃ ●  lint  Lint the repository
+│
+├─ (2) extra     not installed
+│   ┃ ●  help  Help
+│
+└─  ◎  metro-lx  13cd9935af1d → a1b2c3d4e5f6  behind · 12 Nov 2026
+    ┃ ▲  PostToolUse         line-lx report-usage --agent claude-code --workspa…
+    ┃ ▲  PostToolUseFailure  line-lx report-usage --agent claude-code --workspa…
   Run ` + "`line-lx sync`" + `, or start Claude Code, to install what's missing.
 
-Codex        set up · ~/.codex/skills · synced 2 d ago
-  PLUGIN                          VERSION  STATUS          INSTALLED  UPDATED
-  an-old-plugin-with-a-long-name  2.0.0    not in the hub  –          2026-09-01
-  └─ skill gone
-  notes                           1.1.0    behind: 1.2.0   18 d ago   2 d ago
-  └─ skill jot  Jot a note
-  extra                           –        not installed   –          –
-  └─ skill help  Help
-  tools                           –        not installed   –          –
-  └─ skill lint  Lint the repository
+▌Codex         set up · ~/.codex/skills · synced 2d ago
+│
+├─     an-old-plugin-with-a-long-name  v2.0.0  not in the hub · 1 Sep 2026
+│   ┃ ●  gone
+│
+├─ (1) notes                           v1.1.0 → v1.2.0  behind · 2d ago
+│   ┃ ●  jot  Jot a note
+│
+├─ (2) extra                           not installed
+│   ┃ ●  help  Help
+│
+└─ (4) tools                           not installed
+    ┃ ●  lint  Lint the repository
   Run ` + "`line-lx sync`" + ` to catch up with the hub.
 
-pi           set up · ~/.pi/agent/skills · synced 2 min ago
-  PLUGIN  VERSION  STATUS         INSTALLED  UPDATED
-  notes   1.2.0    up to date     18 d ago   2 min ago
-  ├─ skill jot      Jot a note
-  └─ skill summary  Sum up the notes of the day
-  theirs  3.0.0    other hub      –          1 h ago
-  ├─ from  https://other.example.com
-  └─ skill help-with-everything-that-the-other-hub-has-to-offer
-           Helps with what the other hub offers, from start to end
-  extra   –        not installed  –          –
-  └─ skill help  Help
-  tools   –        not installed  –          –
-  └─ skill lint  Lint the repository
+▌pi            set up · ~/.pi/agent/skills · synced 2m ago
+│
+├─ (1) notes   v1.2.0  up to date · 2m ago
+│   ┃ ●  jot      Jot a note
+│   ┃ ●  summary  Sum up the notes of the day
+│
+├─     theirs  v3.0.0  other hub · 1h ago
+│   ┃    from https://other.example.com
+│   ┃ ●  help-with-everything-that-the-other-hub-has-to-offer
+│   ┃    Helps with what the other hub offers, from start to end
+│
+├─ (2) extra   not installed
+│   ┃ ●  help  Help
+│
+└─ (4) tools   not installed
+    ┃ ●  lint  Lint the repository
   Run ` + "`line-lx sync`" + ` to catch up with the hub.
 `
 
@@ -334,14 +347,26 @@ func TestRenderStatus(t *testing.T) {
 	h := newStatusHub(t)
 	statusMachine(t, h.URL)
 	hub, _ := checkHub(h.URL)
+	r := buildStatus(hub, fetchHubView(hub))
 	var b strings.Builder
-	renderStatus(&b, buildStatus(hub, fetchHubView(hub)), statusNow, false)
+	renderStatus(&b, r, statusNow, noColor)
 	if want := strings.ReplaceAll(statusGolden, "HUB", hub); b.String() != want {
 		t.Errorf("status:\n%s\nwant:\n%s", b.String(), want)
 	}
 	for i, line := range strings.Split(b.String(), "\n") {
 		if n := cols(line); n > statusWidth {
 			t.Errorf("line %d is %d columns wide: %q", i+1, n, line)
+		}
+	}
+	// In color, the same glyphs and words in the same columns: a color only adds to what the text says. The route
+	// bullet is the one difference: " 1 " on its line's color, "(1)" without.
+	sgr := regexp.MustCompile("\x1b\\[[0-9;]*m")
+	for _, depth := range []painter{colors256, trueColor} {
+		var colored strings.Builder
+		renderStatus(&colored, r, statusNow, depth)
+		plain := regexp.MustCompile(`\((\d)\)`).ReplaceAllString(b.String(), " $1 ")
+		if got := sgr.ReplaceAllString(colored.String(), ""); got != plain {
+			t.Errorf("depth %d, without its colors:\n%s\nwant:\n%s", depth, got, plain)
 		}
 	}
 }
@@ -354,9 +379,7 @@ func TestStatusFitsInColumns(t *testing.T) {
 		{"g-inject", "リリースノートをチームのために一貫したスタイルで整形します。毎週、丁寧に。"},
 		{"accents", "Re\u0301sume\u0301 des notes de version pour l'e\u0301quipe, chaque semaine, avec soin et style"},
 	}}
-	var b strings.Builder
-	renderChildren(&b, p, false)
-	for _, line := range strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n") {
+	for _, line := range stationLines(p, "│   ", noColor) {
 		if n := cols(line); n > statusWidth || n < statusWidth-1 {
 			t.Errorf("%d columns, want %d (or %d when a wide character doesn't fit): %q", n, statusWidth, statusWidth-1, line)
 		}
