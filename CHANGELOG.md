@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-23
+
+### Changed
+
+- `status` reads like the metro-lx map. Each agent is a terminus, each plugin a line, with the route number and the color the web app gives it, and its skills (●) and hooks (▲) are the stations on it, each shape on its part's pastel. Plugins come in the web app's order, then the ones the hub doesn't have, by name. Claude Code's `metro-lx` takes the interchange ring ◎ and comes last. "up to date" is green, "behind" shows both versions (`v1.0.0 → v1.1.0`), and "not installed", "not in the hub" and "other hub" are grey. Times read as in the web app ("2h ago", "yesterday", then the date). Colors are 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the closest of xterm's 256. Without color, the shapes and words say the same, and the route shows as `(1)`. The output still fits in 80 columns.
+- `status --json` gives each plugin its `route` (1 to 6) and `line`, from the hub. Both are `null` with a hub that doesn't give them.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added
@@ -73,7 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Delivery of a Metro-LX hub's plugins to Claude Code, Codex and pi.
 - Signed releases for macOS and Linux, on amd64 and arm64, with SBOMs and build provenance.
 
-[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/moqa-studio/line-lx-cli/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/moqa-studio/line-lx-cli/compare/v0.1.2...v0.2.0
